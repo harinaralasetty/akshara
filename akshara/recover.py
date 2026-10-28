@@ -7,24 +7,30 @@ from .meta_client import SPARK
 
 
 def glyph_pages(pdf, page_numbers):
-    """Call the pre-existing dependency once for all selected glyph pages."""
+    """Isolate unsupported glyph content so other pages can still recover."""
     if not page_numbers:
         return {}, []
     from legacylipi.core.glyph_recovery import recover_pdf
 
-    recovered = recover_pdf(pdf, page_numbers=set(page_numbers), convert_legacy=False)
-    pages = {}
-    for page in recovered.pages:
-        spans = []
-        for block in page.text_blocks:
-            if block.text.strip() and block.position:
-                box = block.position
-                spans.append(dict(page=page.page_number, bbox=[box.x0, box.y0, box.x1, box.y1],
-                                  text=block.text, source="glyph_id" if block.detected_encoding == "glyph-id" else "native",
-                                  verification="UNCERTAIN"))
-        pages[page.page_number] = spans
-    # Preserve the dependency's uncertainty disclosures, without its source path.
-    return pages, recovered.warnings
+    pages, warnings = {}, []
+    for number in page_numbers:
+        try:
+            recovered = recover_pdf(pdf, page_numbers={number}, convert_legacy=False)
+        except (ValueError, AssertionError) as exc:
+            # Do not include dependency messages that may disclose source paths.
+            warnings.append(f"Page {number}: glyph recovery failed ({type(exc).__name__}); using vision")
+            continue
+        for page in recovered.pages:
+            spans = []
+            for block in page.text_blocks:
+                if block.text.strip() and block.position:
+                    box = block.position
+                    spans.append(dict(page=page.page_number, bbox=[box.x0, box.y0, box.x1, box.y1],
+                                      text=block.text, source="glyph_id" if block.detected_encoding == "glyph-id" else "native",
+                                      verification="UNCERTAIN"))
+            pages[page.page_number] = spans
+        warnings.extend(recovered.warnings)
+    return pages, warnings
 
 
 def mapped_legacy(page):

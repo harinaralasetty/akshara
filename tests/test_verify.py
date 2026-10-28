@@ -90,3 +90,22 @@ def test_rotated_image_coordinates_are_pdf_coordinates():
         page.set_rotation(90)
         assert image_box_to_pdf(page, [0, 0, 1000, 1000]) == [0, 0, 200, 100]
         assert image_box_to_pdf(page, [0, 0, 500, 500]) == [0, 50, 100, 100]
+
+@pytest.mark.parametrize('left,right', [('A -100 B 100', 'A 100 B -100'),
+    ('Rate 5%', 'Rate 5'), ('Amount (100)', 'Amount 100')])
+def test_numeric_meaning_and_order(left, right):
+    assert not compare_texts(left, right)['agree']
+
+@pytest.mark.parametrize('corrected', [False, True])
+def test_displaced_citations_remain_uncertain(tmp_path, corrected):
+    data = [dict(spans=[dict(text='amount 100', bbox=[10, 10, 100, 40])]),
+            dict(spans=[dict(text='amount 100', bbox=[700, 700, 900, 900])])]
+    client = FakeClient(data, cache_dir=tmp_path)
+    client.simulated = False
+    with fitz.open() as doc:
+        page = doc.new_page(width=1000, height=1000)
+        recovered = [dict(page=1, bbox=[700, 700, 900, 900],
+                          text='amount 200' if corrected else 'amount 100', source='native')]
+        spans, evidence = verify_page(client, page, b'png', recovered)
+    assert evidence['status'] == 'UNCERTAIN'
+    assert spans[0]['verification'] == 'UNCERTAIN'

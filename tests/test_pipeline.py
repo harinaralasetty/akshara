@@ -117,3 +117,24 @@ def test_only_supported_legacy_mappings_are_applied(monkeypatch):
     assert mapped[0]["text"] == "क" and mapped[0]["source"] == "legacy_font"
     monkeypatch.setattr(recovery, "native_spans", lambda page: native("Shree-Tel7-001"))
     assert recovery.mapped_legacy(None) is None
+
+
+def test_glyph_failure_falls_back_per_page(tmp_path, monkeypatch):
+    import legacylipi.core.glyph_recovery as glyph
+    from types import SimpleNamespace
+    from akshara.recover import glyph_pages
+    calls = []
+    def recover(pdf, *, page_numbers, convert_legacy):
+        calls.append(page_numbers)
+        if 2 in page_numbers:
+            raise ValueError('ambiguous font')
+        return SimpleNamespace(pages=[], warnings=[])
+    monkeypatch.setattr(glyph, 'recover_pdf', recover)
+    pages, warnings = glyph_pages('unused.pdf', [1, 2, 3])
+    assert calls == [{1}, {2}, {3}]
+    assert 2 not in pages and 'page 2' in warnings[0].lower()
+    client = FakeClient([dict(spans=[dict(text='vision fallback', bbox=[0, 0, 100, 100])])], cache_dir=tmp_path)
+    with fitz.open() as doc:
+        doc.new_page()
+        page = doc.new_page()
+        assert recover_page(page, 'glyph_id', b'png', client, glyphs=pages)[0]['source'].startswith('vision:')

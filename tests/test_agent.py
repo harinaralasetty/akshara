@@ -132,7 +132,8 @@ def test_simulated_report_cannot_produce_verified_citations(report,tmp_path):
         final([dict(page=1,bbox=[10,10,80,30],quote='100')])])
     client.simulated=False
     result=agent.ask(report,'Amount?',client)
-    assert result['simulated'] and result['citations'][0]['verification']=='UNCERTAIN'
+    assert not result['simulated'] and result['evidence_simulated']
+    assert result['citations'][0]['verification']=='UNCERTAIN'
 
 
 def test_real_report_preserves_verification_and_abstain_choice(report,tmp_path):
@@ -235,4 +236,23 @@ def test_model_operational_errors_propagate_from_tools(report, tmp_path, tool, f
         raise exception('unavailable')
     client = FakeClient(cache_dir=tmp_path / 'cache', handler=handler)
     with pytest.raises(exception):
+        agent.ask(report, 'Read?', client)
+
+@pytest.mark.parametrize('tool', [None, 'read_region', 'segment'])
+@pytest.mark.parametrize('failure', ['auth', 'connection', 'missing'])
+def test_provider_failures_propagate(report, tmp_path, tool, failure):
+    import httpx
+    from openai import AuthenticationError, APIConnectionError
+    from akshara.meta_client import MissingKey
+    request = httpx.Request('POST', 'https://offline.invalid')
+    error = {'auth': AuthenticationError('bad key', response=httpx.Response(401, request=request), body=None),
+             'connection': APIConnectionError(request=request), 'missing': MissingKey('no key')}[failure]
+    def handler(operation, payload):
+        if tool and operation == 'tool_chat':
+            args = dict(page=1, bbox=[10, 10, 80, 30]) if tool == 'read_region' else dict(page=1, concept='table')
+            return assistant(call(tool, args))
+        raise error
+    client = FakeClient(cache_dir=tmp_path / 'cache', handler=handler)
+    client.simulated = False
+    with pytest.raises(type(error)):
         agent.ask(report, 'Read?', client)

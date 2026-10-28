@@ -75,7 +75,9 @@ def response_usage(raw):
     incoming = usage.get("prompt_tokens", usage.get("input_tokens"))
     outgoing = usage.get("completion_tokens", usage.get("output_tokens"))
     details = usage.get("prompt_tokens_details") or usage.get("input_tokens_details") or {}
-    cached = details.get("cached_tokens", 0)
+    cached = details.get("cached_tokens")
+    if cached is None:
+        cached = 0
     for value in (incoming, outgoing, cached):
         if value is not None and (type(value) is not int or value < 0):
             raise ResponseError("Invalid response token usage")
@@ -187,6 +189,8 @@ async def parse_sam_events(events):
     try:
         result = await parse_responses_stream(events, image_segmentation_format()).final_result()
     except ResponsesStreamError as exc:
+        if exc.cause is not None and retryable(exc.cause):
+            raise exc.cause
         raise ResponseError(f"SAM stream failed: {exc.code}") from exc
     if result.outcome.status != "completed" or any(d.severity == "error" for d in result.diagnostics):
         raise ResponseError("SAM returned an incomplete or invalid segmentation")
@@ -220,6 +224,40 @@ class MetaClient:
     def estimate(self, payload):
         usage, images = request_size(payload)
         return usage_cost(payload["model"], usage, images)
+
+    def count_input_tokens(self, payload):
+        """Upper bound, not an exact tokenizer count; never use the tile estimate."""
+        # Cookbook 01_api_fundamentals/08_long_context: Spark context = 1,048,576.
+        # Local Meta pricing lists Wonder as 1M context. A whole context per image
+        # bounds any accepted image, regardless of resolution or URL encoding.
+        image_bound = 1_048_576
+        images = 0
+
+        def without_images(value):
+            nonlocal images
+            if isinstance(value, dict):
+                if value.get("type") in {"image_url", "input_image"}:
+                    images += 1
+                    return "[image]"
+                return {k: without_images(v) for k, v in value.items()}
+            if isinstance(value, list):
+                return [without_images(v) for v in value]
+            return value
+
+        # Byte-level BPE merges bytes, so text tokens cannot exceed UTF-8 bytes.
+        # Include all JSON (tools, schemas, tool results too), plus generous fixed
+        # framing for each message and the assistant generation prefix.
+        text_bytes = len(json.dumps(without_images(payload), ensure_ascii=False).encode("utf-8"))
+        return text_bytes + 256 * (len(payload.get("messages", [])) + 1) + images * image_bound
+
+    def reservation(self, payload):
+        if payload["model"] == SAM:
+            return self.estimate(payload)
+        count = self.count_input_tokens(payload)
+        if type(count) is not int or count < 0:
+            raise SpendLimit("Invalid model input-token count")
+        return usage_cost(payload["model"], dict(input_tokens=count,
+            cached_input_tokens=0, output_tokens=payload["max_completion_tokens"]))
 
     def _record(self, payload, raw, source, *, failed=False, reservation=Decimal(0)):
         model = payload["model"]
@@ -260,11 +298,13 @@ class MetaClient:
         return dict(stop=stop_after_attempt(self.max_attempts), retry=retry_if_exception(retryable),
                     wait=wait_exponential(multiplier=1, min=1, max=8), reraise=True)
 
-    def _cached(self, operation, payload, send):
+    def _cached(self, operation, payload, send, validate=None):
         if not self.use_cache:
             result = send(payload)
             if self.simulated:
                 self._record(payload, result, "fake")
+            if validate is not None:
+                validate(result)
             return result
         digest = request_hash(self.namespace, operation, payload)
         path = self.cache_dir / f"{digest}.json"
@@ -272,14 +312,34 @@ class MetaClient:
             cached = json.loads(path.read_text(encoding="utf-8"))
             if cached.get("request_hash") != digest or cached.get("namespace") != self.namespace:
                 raise ResponseError("Invalid cache envelope")
-            self.cache_hits += 1
-            self._record(payload, cached["response"], "fake" if self.simulated else "cache")
-            return cached["response"]
+            try:
+                if validate is not None:
+                    validate(cached["response"])
+            except ResponseError:
+                if self.replay:
+                    raise
+                failures = self.cache_dir / "failures"
+                failures.mkdir(parents=True, exist_ok=True)
+                path.replace(failures / path.name)
+            else:
+                self.cache_hits += 1
+                self._record(payload, cached["response"], "fake" if self.simulated else "cache")
+                return cached["response"]
         if self.replay:
             raise CacheMiss(f"Replay cache miss: {operation} {digest}")
         result = send(payload)
         if self.simulated:
             self._record(payload, result, "fake")
+        if validate is not None:
+            try:
+                validate(result)
+            except ResponseError:
+                failures = self.cache_dir / "failures"
+                failures.mkdir(parents=True, exist_ok=True)
+                with NamedTemporaryFile(mode="w", encoding="utf-8", dir=failures,
+                                        suffix=".json", delete=False) as handle:
+                    json.dump(dict(request_hash=digest, response=result), handle, ensure_ascii=False)
+                raise
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         envelope = dict(namespace=self.namespace, request_hash=digest, response=result)
         # Atomic replacement: an interrupted write must not become a cache hit.
@@ -299,7 +359,7 @@ class MetaClient:
         key = self._key()
         for attempt in Retrying(**self._retry_options()):
             with attempt:
-                reservation = self.guard.reserve(self.estimate(payload))
+                reservation = self.guard.reserve(self.reservation(payload))
                 try:
                     # Each tenacity retry gets its own budget reservation.
                     with OpenAI(base_url=BASE_URL, api_key=key, max_retries=0, timeout=self.timeout) as api:
@@ -330,7 +390,7 @@ class MetaClient:
         key = self._key()
         async for attempt in AsyncRetrying(**self._retry_options()):
             with attempt:
-                reservation = self.guard.reserve(self.estimate(payload))
+                reservation = self.guard.reserve(self.reservation(payload))
                 try:
                     result = await self._sam_once(payload, key)
                     self._record(payload, result, "live", reservation=reservation)
@@ -354,13 +414,19 @@ class MetaClient:
         if schema is not None:
             payload["response_format"] = dict(type="json_schema", json_schema=dict(
                 name=schema_name, strict=True, schema=schema))
-        result = self._cached("chat", payload, self._send_chat)
+        validate = lambda raw: self._chat_result(raw, schema)
+        return validate(self._cached("chat", payload, self._send_chat, validate))
+
+    @staticmethod
+    def _chat_result(result, schema):
         try:
             choice = result["choices"][0]
             message = choice["message"]
             if message.get("refusal") or choice.get("finish_reason") != "stop":
                 raise ResponseError("Model refused or did not finish its response")
             text = message["content"]
+            if not isinstance(text, str):
+                raise ResponseError("Missing completion text")
             return json.loads(text) if schema is not None else text
         except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
             raise ResponseError("Malformed model response") from exc
@@ -386,7 +452,10 @@ class MetaClient:
         """
         payload = json.loads(json.dumps(dict(model=model, messages=messages, tools=tools,
             tool_choice="auto", max_completion_tokens=MAX_COMPLETION_TOKENS), allow_nan=False))
-        result = self._cached("tool_chat", payload, self._send_tool_chat)
+        return self._tool_result(self._cached("tool_chat", payload, self._send_tool_chat, self._tool_result))
+
+    @staticmethod
+    def _tool_result(result):
         try:
             choice = result["choices"][0]
             message = choice["message"]

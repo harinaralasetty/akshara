@@ -20,6 +20,15 @@ def whitespace(text):
     return " ".join(text.split())
 
 
+def token_end(source, value, start=0):
+    """Find a contiguous whole-token quote, optionally after earlier cells."""
+    words, wanted = source.split(), value.split()
+    for i in range(start, len(words) - len(wanted) + 1):
+        if words[i:i + len(wanted)] == wanted:
+            return i + len(wanted)
+    return None
+
+
 def ground_records(data, spans):
     """Reject fabricated quotes, values, or span IDs; derive bbox and status locally."""
     if not isinstance(data, dict) or not isinstance(data.get("records"), list):
@@ -45,15 +54,18 @@ def ground_records(data, spans):
                 raise ValueError("empty or malformed value/evidence")
             quote = whitespace(evidence)
             source = whitespace(" ".join(s["text"] for s in support))
-            if quote not in source:
+            if token_end(source, quote) is None:
                 raise ValueError("quote absent from cited spans")
             # doc_type is an inferred label; all other values must occur literally.
-            if candidate["kind"] != "doc_type" and whitespace(value) not in quote:
+            if candidate["kind"] != "doc_type" and token_end(quote, value) is None:
                 raise ValueError("value absent from quoted evidence")
             if candidate["kind"] == "table_row" and not cells:
                 raise ValueError("table row has no cells")
-            if any(whitespace(cell) not in quote for cell in cells):
-                raise ValueError("table cell absent from quoted evidence")
+            cursor = 0
+            for cell in cells:
+                cursor = token_end(quote, cell, cursor)
+                if cursor is None:
+                    raise ValueError("table cell absent or out of order in quoted evidence")
             box = fitz.Rect(support[0]["bbox"])
             for span in support[1:]:
                 box |= fitz.Rect(span["bbox"])
@@ -61,7 +73,7 @@ def ground_records(data, spans):
             status = "UNCERTAIN" if "UNCERTAIN" in statuses else (
                 "CORRECTED" if "CORRECTED" in statuses else "VERIFIED")
             # An inferred type is not itself independently verified by a literal read.
-            if candidate["kind"] == "doc_type" and whitespace(value) not in quote:
+            if candidate["kind"] == "doc_type" and token_end(quote, value) is None:
                 status = "UNCERTAIN"
             records.append(dict(kind=candidate["kind"], value=value, cells=cells, evidence=evidence,
                                 span_ids=ids, page=next(iter(pages)), bbox=list(box), verification=status,

@@ -51,3 +51,12 @@ def test_inferred_document_type_is_not_verified_as_a_literal():
     record.update(kind="doc_type", value="budget")
     records, _ = ground_records(dict(records=[record]), [span()])
     assert records[0]["verification"] == "UNCERTAIN"
+
+@pytest.mark.parametrize('source,value,cells', [
+    ('Amount -1000', '100', []), ('Rate 5%', '5', []),
+    ('A 100 B 200', 'A 100 B 200', ['200', '100']),
+    ('A 100 B 200', 'A 100 B 200', ['100', '100'])])
+def test_complete_values_and_ordered_cells(source, value, cells):
+    record = dict(kind='table_row' if cells else 'amount', value=value,
+                  evidence=source, cells=cells, span_ids=[0])
+    assert not ground_records(dict(records=[record]), [span(source)])[0]

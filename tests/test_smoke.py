@@ -28,6 +28,7 @@ def test_exactly_three_uncached_tiny_calls_parse_usage_and_sam(tmp_path, monkeyp
         doc.new_page()
         doc.new_page().insert_text((30, 30), "Public demo text block")
         doc.save(pdf)
+    monkeypatch.setattr(module.MetaClient, "count_input_tokens", lambda self, payload: 100)
     calls = []
     def transport(request):
         payload = json.loads(request.content)

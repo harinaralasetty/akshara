@@ -38,7 +38,7 @@ def test_sdk_shape_cache_and_keyless_replay(tmp_path, monkeypatch):
         return httpx.Response(200, json=completion('{"ok": true}'))
     mock_api(monkeypatch, handler)
     schema = dict(type="object", properties=dict(ok=dict(type="boolean")), required=["ok"], additionalProperties=False)
-    client = MetaClient(tmp_path, cap="0.25")
+    client = MetaClient(tmp_path, cap="3")
     kwargs = dict(image=b"png", schema=schema, schema_name="test")
     assert client.chat("read", **kwargs) == {"ok": True}
     assert client.chat("read", **kwargs) == {"ok": True}
@@ -66,7 +66,7 @@ def test_budget_blocks_before_network_and_keeps_failed_reservations(tmp_path, mo
     with pytest.raises(SpendLimit):
         client.chat("second")
     assert len(calls) == 1  # No hidden SDK retry.
-    assert client.guard.summary()["reserved_usd"] == float(client.estimate(dict(
+    assert client.guard.summary()["reserved_usd"] == float(client.reservation(dict(
         model=module.SPARK, messages=[dict(role="user", content=[dict(type="text", text="first")])],
         max_completion_tokens=8192)))
     assert not list(tmp_path.glob("*.json"))
@@ -361,3 +361,120 @@ def test_default_env_file_is_not_read(tmp_path, monkeypatch):
                         if str(p) == "~/.config/akshara/env" else expanduser(p))
     with pytest.raises(MissingKey, match="MODEL_API_KEY missing"):
         load_api_key()
+
+
+def test_hard_cap_requires_counted_input_before_send(tmp_path, monkeypatch):
+    calls = []
+    mock_api(monkeypatch, lambda r: calls.append(r) or httpx.Response(200, json=completion()))
+    client = MetaClient(tmp_path, cap='0.04')
+    client.count_input_tokens = lambda payload: 100000
+    with pytest.raises(SpendLimit):
+        client.chat('small prompt, large provider count')
+    assert calls == []
+
+@pytest.mark.parametrize('details', [{}, {'cached_tokens': None}])
+def test_nullable_cached_usage_is_zero(tmp_path, monkeypatch, details):
+    raw = completion()
+    raw['usage'] = dict(prompt_tokens=1000, completion_tokens=10, prompt_tokens_details=details)
+    mock_api(monkeypatch, lambda r: httpx.Response(200, json=raw))
+    client = MetaClient(tmp_path)
+    assert client.chat('nullable') == 'hello'
+    assert client.usage_summary()['cached_input_tokens'] == 0
+    assert client.chat('nullable') == 'hello'
+    assert client.guard.calls == 1
+
+
+def test_sam_source_timeout_is_retried_with_reservation(tmp_path, monkeypatch):
+    monkeypatch.setattr(module, 'wait_exponential', lambda **kwargs: wait_none())
+    monkeypatch.setenv('MODEL_API_KEY', 'offline-test-key')
+    client = MetaClient(tmp_path)
+    attempts = []
+    async def once(payload, key):
+        attempts.append(1)
+        async def events():
+            if len(attempts) == 1:
+                raise TimeoutError('offline timeout')
+            yield dict(type='response.output_text.done', item_id='x', output_index=0, content_index=0, text='')
+            yield dict(type='response.completed', response=dict(id='r', status='completed', output=[]))
+        return await parse_sam_events(events())
+    monkeypatch.setattr(client, '_sam_once', once)
+    assert client.segment(b'png', 'table')['boxes'] == []
+    assert len(attempts) == client.guard.calls == 2
+
+@pytest.mark.parametrize('finish,content', [('length', '{}'), ('stop', 'not json')])
+def test_invalid_completions_are_recorded_but_not_success_cached(tmp_path, monkeypatch, finish, content):
+    responses = [completion(content, finish), completion('{"ok": true}')]
+    mock_api(monkeypatch, lambda r: httpx.Response(200, json=responses.pop(0)))
+    client = MetaClient(tmp_path)
+    with pytest.raises(ResponseError):
+        client.chat('retry invalid', schema={})
+    assert client.chat('retry invalid', schema={}) == {'ok': True}
+    assert client.guard.calls == 2
+    assert len(list((tmp_path / 'failures').glob('*.json'))) == 1
+
+
+@pytest.mark.parametrize("text", ["The grant is Rs. 12,500 for each school.",
+                                  "ప్రతి పాఠశాలకు రూ. 12,500 మంజూరు చేశారు."])
+def test_input_bound_covers_byte_level_tokens(tmp_path, text):
+    payload = dict(model=module.SPARK, messages=[dict(role="user", content=text)],
+                   tools=[dict(type="function", function=dict(name="search", description=text))],
+                   response_format=dict(type="json_schema", json_schema=dict(schema={"description": text})),
+                   max_completion_tokens=64)
+    # Even an unmerged byte-level tokenization of every supplied string fits.
+    def bytes_in(value):
+        if isinstance(value, str):
+            return len(value.encode("utf-8"))
+        if isinstance(value, dict):
+            return sum(bytes_in(k) + bytes_in(v) for k, v in value.items())
+        if isinstance(value, list):
+            return sum(map(bytes_in, value))
+        return 0
+    assert MetaClient(tmp_path).count_input_tokens(payload) >= bytes_in(payload)
+
+
+@pytest.mark.parametrize("model", [module.SPARK, module.WONDER])
+def test_live_bound_authorises_and_enforces_cap(tmp_path, monkeypatch, model):
+    calls = []
+    mock_api(monkeypatch, lambda r: calls.append(r) or httpx.Response(200, json=completion()))
+    payload = dict(model=model, messages=[dict(role="user", content=[dict(type="text", text="తెలుగు English")])],
+                   max_completion_tokens=64)
+    amount = MetaClient(tmp_path).reservation(payload)
+    client = MetaClient(tmp_path, cap=amount, use_cache=False)
+    assert client.chat("తెలుగు English", model=model, max_completion_tokens=64) == "hello"
+    assert client.guard.reserved == amount
+    with pytest.raises(SpendLimit):
+        client.chat("తెలుగు English", model=model, max_completion_tokens=64)
+    assert len(calls) == 1
+    image_client = MetaClient(tmp_path, cap=5, use_cache=False)
+    assert image_client.chat("read", image=b"png", model=model) == "hello"
+    with pytest.raises(SpendLimit):
+        MetaClient(tmp_path, cap="0.25", use_cache=False).chat("read", image=b"png", model=model)
+    assert len(calls) == 2
+
+
+def test_image_bound_uses_full_context_per_image(tmp_path):
+    client = MetaClient(tmp_path)
+    payload = dict(model=module.SPARK, messages=[dict(role="user", content=[])])
+    baseline = client.count_input_tokens(payload)
+    payload["messages"][0]["content"] = [dict(type="image_url", image_url=dict(url="data:,x"))] * 2
+    assert client.count_input_tokens(payload) >= baseline + 2 * 1_048_576
+
+
+
+def test_reservation_includes_full_output_limit(tmp_path):
+    client = MetaClient(tmp_path)
+    client.count_input_tokens = lambda payload: 1000
+    payload = dict(model=module.WONDER, max_completion_tokens=8192)
+    assert client.reservation(payload) == Decimal('0.167840')
+
+
+def test_old_invalid_cache_can_be_refreshed(tmp_path, monkeypatch):
+    mock_api(monkeypatch, lambda r: httpx.Response(200, json=completion('{"ok":true}')))
+    client = MetaClient(tmp_path)
+    client.chat('old invalid', schema={})
+    path = next(tmp_path.glob('*.json'))
+    envelope = json.loads(path.read_text())
+    envelope['response'] = completion('{}', 'length')
+    path.write_text(json.dumps(envelope))
+    assert client.chat('old invalid', schema={}) == {'ok': True}
+    assert client.guard.calls == 2

@@ -7,10 +7,11 @@ from pathlib import Path
 
 import pymupdf as fitz
 from PIL import Image
+from openai import OpenAIError
 
 from .evidence import BBOX_SCHEMA, READ_SCHEMA, prompt, valid_bbox
 from .extract import whitespace
-from .meta_client import CacheMiss, ResponseError, SPARK, SpendLimit
+from .meta_client import CacheMiss, MissingKey, ResponseError, SPARK, SpendLimit
 
 
 def _tool(name, description, properties):
@@ -208,7 +209,7 @@ def ask(report_path, question, client, *, max_steps=6):
     messages = [dict(role="system", content=SYSTEM + "\nAVAILABLE PAGES:\n" +
                      json.dumps(context, ensure_ascii=False)), dict(role="user", content=question)]
     result = dict(answer="Not sure: I cannot verify an answer from the available evidence.", citations=[], abstained=True,
-                  steps=0, simulated=document.simulated)
+                  steps=0, simulated=bool(client.simulated), evidence_simulated=document.simulated)
     for step in range(1, max_steps + 1):
         result["steps"] = step
         try:
@@ -227,15 +228,15 @@ def ask(report_path, question, client, *, max_steps=6):
                 snapshot = dict(document.evidence)
                 try:
                     data = document.execute(call["function"]["name"], json.loads(call["function"]["arguments"]))
-                except (CacheMiss, SpendLimit):
+                except (CacheMiss, SpendLimit, MissingKey, OpenAIError, TimeoutError):
                     raise
-                except Exception as exc:
+                except (ValueError, KeyError, TypeError) as exc:
                     document.evidence = snapshot
                     data = dict(error=type(exc).__name__ + ": tool failed or arguments were invalid")
                 messages.append(dict(role="tool", tool_call_id=call["id"],
                                      content=json.dumps(data, ensure_ascii=False, allow_nan=False)))
-        except (CacheMiss, SpendLimit):
+        except (CacheMiss, SpendLimit, MissingKey, OpenAIError, TimeoutError, ResponseError):
             raise
-        except Exception:
+        except (ValueError, KeyError, TypeError):
             return result
     return result

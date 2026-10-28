@@ -3,6 +3,8 @@
 import re
 import unicodedata
 
+import pymupdf as fitz
+
 from .evidence import read_page
 from .meta_client import SPARK, WONDER
 
@@ -18,7 +20,7 @@ def key_fields(text):
     # Names cannot be reliably recognized with Telugu regexes. Compare ALL word
     # content as well, so a changed name cannot be excused by matching numbers.
     words = "".join(c if c.isalnum() or unicodedata.category(c).startswith("M")
-                    or c in "\u200c\u200d" else " " for c in text)
+                    or c in "\u200c\u200d+-−%()" else " " for c in text)
     return dict(
         numbers=sorted(re.findall(r"[+-]?\d+(?:\.\d+)*", text)),
         dates=sorted(re.findall(r"\b\d{1,4}[-/.]\d{1,2}[-/.]\d{1,4}\b", text)),
@@ -53,16 +55,37 @@ def decide(recovered, spark, wonder=None):
     return "UNCERTAIN"
 
 
+def aligned(left, right):
+    """Conservatively require one-to-one text and box agreement.
+
+    At least half of each box must overlap. Different span splitting abstains.
+    """
+    if not left or len(left) != len(right):
+        return False
+    for a, b in zip(left, right):
+        x, y = fitz.Rect(a["bbox"]), fitz.Rect(b["bbox"])
+        overlap = (x & y).get_area()
+        if (min(x.get_area(), y.get_area()) <= 0
+                or overlap < .5 * max(x.get_area(), y.get_area())
+                or a["page"] != b["page"]
+                or not compare_texts(a["text"], b["text"])["agree"]):
+            return False
+    return True
+
+
 def verify_page(client, page, image, recovered):
     spark = read_page(client, page, image, model=SPARK,
                       purpose="First independent verification read. Read only the page image.")
     original_text, spark_text = spans_text(recovered), spans_text(spark)
     comparison = compare_texts(original_text, spark_text)
     wonder = None
-    if not comparison["agree"]:
+    if not comparison["agree"] or not aligned(recovered, spark):
         wonder = read_page(client, page, image, model=WONDER,
                            purpose="Second independent verification read. Read only the page image.")
     status = decide(original_text, spark_text, spans_text(wonder) if wonder is not None else None)
+    if ((status == "VERIFIED" and not aligned(recovered, spark))
+            or (status == "CORRECTED" and not aligned(spark, wonder))):
+        status = "UNCERTAIN"
     selected = wonder if status == "CORRECTED" else recovered
     # A scripted client cannot supply independent verification evidence.
     if client.simulated:
