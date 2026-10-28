@@ -37,8 +37,9 @@ def attach_regions(spans, regions):
             (box & fitz.Rect(r["bbox"])).get_area() >= box.get_area() * .5)]
 
 
-def write_report(output, report, client):
+def write_report(output, report, client, usage_start=0):
     report["client"] = client.summary()
+    report["usage"] = client.usage_summary(usage_start)
     temporary = output / "report.json.tmp"
     temporary.write_text(json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False) + "\n", encoding="utf-8")
     temporary.replace(output / "report.json")
@@ -50,22 +51,26 @@ def run(pdf, client, *, max_pages=None, output_root="runs"):
     pdf = Path(pdf)
     output = Path(output_root) / pdf.stem
     output.mkdir(parents=True, exist_ok=True)
+    usage_start = len(client.usage)
     report = dict(document=pdf.name, generation=uuid4().hex, complete=False,
+                  synthetic="SYNTHETIC" in pdf.name,
                   simulated=client.simulated, pages=[], records=[],
                   coordinates="PDF points, unrotated crop-relative, top-left origin; pages are 1-based",
                   limitations=["Vision boxes are model estimates, not pixel-perfect annotations.",
                                "VERIFIED means conservative reader agreement, not ground truth."])
-    write_report(output, report, client)
+    write_report(output, report, client, usage_start)
     try:
         with fitz.open(pdf) as doc:
             if doc.needs_pass:
                 raise ValueError("Password-protected PDFs are not supported")
             triage = triage_document(doc, max_pages)
+            report["synthetic"] |= "SYNTHETIC" in (doc.metadata.get("subject") or "")
             report.update(page_count=len(doc), selected_pages=len(triage["pages"]), triage=triage,
                           truncated=len(triage["pages"]) < len(doc))
             glyphs, warnings = glyph_pages(pdf, [p["page"] for p in triage["pages"] if p["label"] == "glyph_id"])
             report["recovery_warnings"] = warnings
             for route in triage["pages"]:
+                page_usage_start = len(client.usage)
                 page = doc[route["page"] - 1]
                 pixmap = page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
                 image = pixmap.tobytes("png")
@@ -81,14 +86,15 @@ def run(pdf, client, *, max_pages=None, output_root="runs"):
                                             width=page.rect.width, height=page.rect.height,
                                             bounds=list(page_bounds(page)), rotation=page.rotation,
                                             spans=spans, verification=verification, regions=regions,
+                                            usage=client.usage_summary(page_usage_start),
                                             records=records, rejected_records=rejected))
                 report["records"].extend(records)
-                write_report(output, report, client)
+                write_report(output, report, client, usage_start)
         report["complete"] = True
-        write_report(output, report, client)
+        write_report(output, report, client, usage_start)
     except Exception as exc:
         # Retain completed pages, but never describe an interrupted run as complete.
         report["error"] = type(exc).__name__
-        write_report(output, report, client)
+        write_report(output, report, client, usage_start)
         raise
     return output / "report.json"

@@ -3,7 +3,9 @@
 import asyncio
 import base64
 import hashlib
+import io
 import json
+import math
 import os
 from collections import deque
 from contextlib import aclosing
@@ -12,15 +14,22 @@ from decimal import Decimal
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 
-from openai import AsyncOpenAI, OpenAI
+from openai import APIConnectionError, APIStatusError, AsyncOpenAI, OpenAI
+from PIL import Image
+from tenacity import AsyncRetrying, Retrying, retry_if_exception, stop_after_attempt, wait_exponential
 
 BASE_URL = "https://api.meta.ai/v1"
 SPARK = "muse-spark-1.3"
 WONDER = "muse-wonder-1.0"
-# Budget reservation, NOT a tariff or a guarantee of actual provider billing.
-# Tune this one conservative estimate for the bounded requests used in this round.
-CALL_ESTIMATE_USD = "0.25"
+SAM = "sam-3.1"
+# USD per million tokens; SAM's tariff is USD per thousand input images.
+PRICES = {
+    SPARK: dict(input="1.25", cached_input="0.15", output="4.25"),
+    WONDER: dict(input="4.00", cached_input="0.20", output="20.00"),
+    SAM: dict(images="2.50"),
+}
 MAX_COMPLETION_TOKENS = 8192
+REQUEST_TIMEOUT = 60
 
 
 class CacheMiss(RuntimeError):
@@ -35,26 +44,109 @@ class ResponseError(ValueError):
     pass
 
 
+class MissingKey(RuntimeError):
+    pass
+
+
+def load_api_key():
+    """Credentials come only from the process environment (see AGENTS.md)."""
+    key = os.environ.get("MODEL_API_KEY", "").strip()
+    if key:
+        return key
+    raise MissingKey("MODEL_API_KEY missing; set it in the environment")
+
+
+def usage_cost(model, usage, images=0):
+    """Prompt usage includes cached tokens; do not bill that subset twice."""
+    price = PRICES[model]
+    if model == SAM:
+        return Decimal(images) * Decimal(price["images"]) / 1000
+    if not usage or usage.get("input_tokens") is None or usage.get("output_tokens") is None:
+        return None
+    cached = usage.get("cached_input_tokens", 0)
+    return (Decimal(usage["input_tokens"] - cached) * Decimal(price["input"]) +
+            Decimal(cached) * Decimal(price["cached_input"]) +
+            Decimal(usage["output_tokens"]) * Decimal(price["output"])) / 1_000_000
+
+
+def response_usage(raw):
+    """Normalize Chat Completions and Responses usage (including reasoning output)."""
+    usage = raw.get("usage") or {}
+    incoming = usage.get("prompt_tokens", usage.get("input_tokens"))
+    outgoing = usage.get("completion_tokens", usage.get("output_tokens"))
+    details = usage.get("prompt_tokens_details") or usage.get("input_tokens_details") or {}
+    cached = details.get("cached_tokens", 0)
+    for value in (incoming, outgoing, cached):
+        if value is not None and (type(value) is not int or value < 0):
+            raise ResponseError("Invalid response token usage")
+    if incoming is not None and cached > incoming:
+        raise ResponseError("Cached tokens exceed input tokens")
+    return dict(input_tokens=incoming, cached_input_tokens=cached, output_tokens=outgoing)
+
+
+def request_size(payload):
+    """Count prompt bytes without base64, and estimate image tokens by 512px tiles.
+
+    One token per UTF-8 byte plus framing is deliberately conservative for text.
+    Image tokens are a reservation heuristic, not a claimed provider tokenizer.
+    """
+    images, image_tokens = 0, 0
+
+    def clean(value):
+        nonlocal images, image_tokens
+        if isinstance(value, dict):
+            if value.get("type") in {"image_url", "input_image"}:
+                images += 1
+                url = value.get("image_url", "")
+                if isinstance(url, dict):
+                    url = url.get("url", "")
+                try:
+                    with Image.open(io.BytesIO(base64.b64decode(url.split(",", 1)[1]))) as image:
+                        tiles = math.ceil(image.width / 512) * math.ceil(image.height / 512)
+                except (ValueError, IndexError, OSError):
+                    tiles = 4
+                image_tokens += 1024 * tiles
+                return "[image]"
+            return {k: clean(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [clean(v) for v in value]
+        return value
+
+    prompt_bytes = len(json.dumps(clean(payload), ensure_ascii=False).encode("utf-8"))
+    return dict(input_tokens=prompt_bytes + 256 + image_tokens, cached_input_tokens=0,
+                output_tokens=payload.get("max_completion_tokens", MAX_COMPLETION_TOKENS)), images
+
+
+def retryable(exc):
+    return isinstance(exc, (APIConnectionError, TimeoutError)) or (
+        isinstance(exc, APIStatusError) and (exc.status_code == 429 or 500 <= exc.status_code < 600))
+
+
 class SpendGuard:
-    def __init__(self, cap=2, estimate=CALL_ESTIMATE_USD):
-        self.cap, self.estimate = Decimal(str(cap)), Decimal(str(estimate))
+    def __init__(self, cap=3):
+        self.cap = Decimal(str(cap))
         if not self.cap.is_finite() or self.cap < 0:
             raise ValueError("Spend cap must be finite and nonnegative")
-        if not self.estimate.is_finite() or self.estimate <= 0:
-            raise ValueError("Call estimate must be finite and positive")
         self.reserved = Decimal(0)
         self.calls = 0
 
-    def reserve(self):
-        if self.reserved + self.estimate > self.cap:
+    def reserve(self, amount):
+        amount = Decimal(str(amount))
+        if not amount.is_finite() or amount <= 0:
+            raise ValueError("Call reservation must be finite and positive")
+        if self.reserved + amount > self.cap:
             raise SpendLimit(f"Call would exceed USD {self.cap} run cap (reserved {self.reserved})")
         # Failed requests may have been billed: never refund their reservation.
-        self.reserved += self.estimate
+        self.reserved += amount
         self.calls += 1
+        return amount
+
+    def reconcile(self, reservation, actual):
+        if actual is not None:
+            self.reserved += actual - reservation
 
     def summary(self):
-        return dict(cap_usd=float(self.cap), call_estimate_usd=float(self.estimate),
-                    reserved_usd=float(self.reserved), attempted_calls=self.calls)
+        return dict(cap_usd=float(self.cap), reserved_usd=float(self.reserved), attempted_calls=self.calls)
 
 
 def image_data_url(image):
@@ -107,20 +199,73 @@ class MetaClient:
     namespace = "meta-v1"
     simulated = False
 
-    def __init__(self, cache_dir="cache", *, replay=False, cap=2, estimate=CALL_ESTIMATE_USD):
+    def __init__(self, cache_dir="cache", *, replay=False, cap=3, timeout=REQUEST_TIMEOUT,
+                 max_attempts=3, use_cache=True):
         self.cache_dir = Path(cache_dir)
         self.replay = replay
-        self.guard = SpendGuard(cap, estimate)
+        if replay and not use_cache:
+            raise ValueError("Replay requires the cache")
+        self.use_cache = use_cache
+        self.guard = SpendGuard(cap)
+        if not math.isfinite(timeout) or timeout <= 0 or type(max_attempts) is not int or max_attempts < 1:
+            raise ValueError("Timeout and retry attempts must be positive")
+        self.timeout, self.max_attempts = timeout, max_attempts
         self.cache_hits = 0
+        self.usage = []
 
     @staticmethod
     def _key():
-        key = os.environ.get("MODEL_API_KEY")
-        if not key:
-            raise RuntimeError("Set MODEL_API_KEY in the environment, or use --replay / --fake")
-        return key
+        return load_api_key()
+
+    def estimate(self, payload):
+        usage, images = request_size(payload)
+        return usage_cost(payload["model"], usage, images)
+
+    def _record(self, payload, raw, source, *, failed=False, reservation=Decimal(0)):
+        model = payload["model"]
+        _, images = request_size(payload)
+        usage = response_usage(raw)
+        cost = usage_cost(model, usage, images) if not failed and source != "fake" else None
+        self.usage.append(dict(model=model, source=source, failed=failed, images=images,
+                               **usage, response_cost_usd=float(cost) if cost is not None else None,
+                               cost_usd=float(cost) if cost is not None and source == "live" else 0,
+                               unresolved_usd=float(reservation) if source == "live" and cost is None else 0))
+        if source == "live":
+            self.guard.reconcile(reservation, cost)
+
+    def usage_summary(self, start=0):
+        fields = ("calls", "paid_calls", "cache_hits", "simulated_calls", "failed_calls", "input_tokens",
+                  "cached_input_tokens", "output_tokens", "images", "cost_usd", "unresolved_usd",
+                  "unreported_usage_calls")
+        models = {}
+        for event in self.usage[start:]:
+            row = models.setdefault(event["model"], dict.fromkeys(fields, 0))
+            row["calls"] += 1
+            row["paid_calls"] += event["source"] == "live"
+            row["cache_hits"] += event["source"] == "cache"
+            row["simulated_calls"] += event["source"] == "fake"
+            row["failed_calls"] += event["failed"]
+            row["unreported_usage_calls"] += (event["source"] != "fake" and
+                                               event["input_tokens"] is None)
+            for field in ("input_tokens", "cached_input_tokens", "output_tokens", "images",
+                          "cost_usd", "unresolved_usd"):
+                row[field] += event[field] or 0
+        total = {field: sum(row[field] for row in models.values()) for field in fields}
+        for row in [total, *models.values()]:
+            for field in ("cost_usd", "unresolved_usd"):
+                row[field] = round(row[field], 12)
+        return dict(**total, by_model=models)
+
+    def _retry_options(self):
+        return dict(stop=stop_after_attempt(self.max_attempts), retry=retry_if_exception(retryable),
+                    wait=wait_exponential(multiplier=1, min=1, max=8), reraise=True)
 
     def _cached(self, operation, payload, send):
+        if not self.use_cache:
+            result = send(payload)
+            if self.simulated:
+                self._record(payload, result, "fake")
+            return result
         digest = request_hash(self.namespace, operation, payload)
         path = self.cache_dir / f"{digest}.json"
         if path.exists():
@@ -128,10 +273,13 @@ class MetaClient:
             if cached.get("request_hash") != digest or cached.get("namespace") != self.namespace:
                 raise ResponseError("Invalid cache envelope")
             self.cache_hits += 1
+            self._record(payload, cached["response"], "fake" if self.simulated else "cache")
             return cached["response"]
         if self.replay:
             raise CacheMiss(f"Replay cache miss: {operation} {digest}")
         result = send(payload)
+        if self.simulated:
+            self._record(payload, result, "fake")
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         envelope = dict(namespace=self.namespace, request_hash=digest, response=result)
         # Atomic replacement: an interrupted write must not become a cache hit.
@@ -149,29 +297,60 @@ class MetaClient:
 
     def _send_chat(self, payload):
         key = self._key()
-        self.guard.reserve()
-        # Disable hidden retries so one reservation corresponds to one attempt.
-        with OpenAI(base_url=BASE_URL, api_key=key, max_retries=0, timeout=120) as api:
-            response = api.chat.completions.create(**payload)
-        return response.model_dump(mode="json")
+        for attempt in Retrying(**self._retry_options()):
+            with attempt:
+                reservation = self.guard.reserve(self.estimate(payload))
+                try:
+                    # Each tenacity retry gets its own budget reservation.
+                    with OpenAI(base_url=BASE_URL, api_key=key, max_retries=0, timeout=self.timeout) as api:
+                        raw = api.chat.completions.create(**payload).model_dump(mode="json")
+                    self._record(payload, raw, "live", reservation=reservation)
+                except Exception:
+                    self._record(payload, {}, "live", failed=True, reservation=reservation)
+                    raise
+                return raw
+
+    async def _sam_once(self, payload, key):
+        usage = {}
+
+        async def observed(events):
+            async for event in events:
+                if event.get("type") == "response.completed":
+                    usage.update(event.get("response", {}).get("usage") or {})
+                yield event
+
+        async with AsyncOpenAI(base_url=BASE_URL, api_key=key, max_retries=0, timeout=self.timeout) as api:
+            stream = await api.responses.create(**payload)
+            async with stream, aclosing(sam_events(stream)) as events:
+                async with aclosing(observed(events)) as measured:
+                    result = await parse_sam_events(measured)
+        return dict(**result, usage=usage)
 
     async def _sam(self, payload):
         key = self._key()
-        self.guard.reserve()
-        async with AsyncOpenAI(base_url=BASE_URL, api_key=key, max_retries=0, timeout=120) as api:
-            stream = await api.responses.create(**payload)
-            async with stream, aclosing(sam_events(stream)) as events:
-                return await parse_sam_events(events)
+        async for attempt in AsyncRetrying(**self._retry_options()):
+            with attempt:
+                reservation = self.guard.reserve(self.estimate(payload))
+                try:
+                    result = await self._sam_once(payload, key)
+                    self._record(payload, result, "live", reservation=reservation)
+                except Exception:
+                    self._record(payload, {}, "live", failed=True, reservation=reservation)
+                    raise
+                return result
 
     def _send_sam(self, payload):
         return asyncio.run(self._sam(payload))
 
-    def chat(self, prompt, *, image=None, schema=None, schema_name="result", model=SPARK):
+    def chat(self, prompt, *, image=None, schema=None, schema_name="result", model=SPARK,
+             max_completion_tokens=MAX_COMPLETION_TOKENS):
+        if type(max_completion_tokens) is not int or max_completion_tokens <= 0:
+            raise ValueError("max_completion_tokens must be a positive integer")
         content = [{"type": "text", "text": prompt}]
         if image is not None:
             content.append({"type": "image_url", "image_url": {"url": image_data_url(image)}})
         payload = dict(model=model, messages=[dict(role="user", content=content)],
-                       max_completion_tokens=MAX_COMPLETION_TOKENS)
+                       max_completion_tokens=max_completion_tokens)
         if schema is not None:
             payload["response_format"] = dict(type="json_schema", json_schema=dict(
                 name=schema_name, strict=True, schema=schema))
@@ -189,7 +368,7 @@ class MetaClient:
     def segment(self, image, concept):
         if not concept.strip():
             raise ValueError("Segmentation concept must not be empty")
-        payload = dict(model="sam-3.1", stream=True, input=[dict(
+        payload = dict(model=SAM, stream=True, input=[dict(
             type="message", role="user", content=[
                 dict(type="input_text", text=concept.strip()),
                 dict(type="input_image", image_url=image_data_url(image)),
@@ -232,7 +411,8 @@ class MetaClient:
             raise ResponseError("Malformed tool response") from exc
 
     def summary(self):
-        return dict(**self.guard.summary(), cache_hits=self.cache_hits, simulated=self.simulated)
+        return dict(**self.guard.summary(), cache_hits=self.cache_hits, simulated=self.simulated,
+                    usage=self.usage_summary())
 
 
 class FakeClient(MetaClient):

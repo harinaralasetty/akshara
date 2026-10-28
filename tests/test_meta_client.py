@@ -1,21 +1,26 @@
 import asyncio
 import json
+from decimal import Decimal
 
 import httpx
 import pytest
 from openai import APIStatusError
+from tenacity import wait_none
 
 import akshara.meta_client as module
 from akshara.meta_client import (CacheMiss, FakeClient, MetaClient, ResponseError,
-                                 SpendGuard, SpendLimit, parse_sam_events, request_hash, sam_events)
+                                 MissingKey, SpendGuard, SpendLimit, load_api_key, parse_sam_events,
+                                 request_hash, sam_events, usage_cost)
 
 
 def mock_api(monkeypatch, handler):
     from openai import OpenAI
     monkeypatch.setenv("MODEL_API_KEY", "offline-test-key")
+    monkeypatch.setattr(module, "wait_exponential", lambda **kwargs: wait_none())
     def factory(**kwargs):
         assert kwargs["base_url"] == "https://api.meta.ai/v1"
         assert kwargs["max_retries"] == 0
+        assert kwargs["timeout"] == 60
         return OpenAI(**kwargs, http_client=httpx.Client(transport=httpx.MockTransport(handler)))
     monkeypatch.setattr(module, "OpenAI", factory)
 
@@ -55,13 +60,15 @@ def test_budget_blocks_before_network_and_keeps_failed_reservations(tmp_path, mo
         calls.append(request)
         return httpx.Response(503, json=dict(error=dict(message="offline transient failure")))
     mock_api(monkeypatch, handler)
-    client = MetaClient(tmp_path, cap="0.25")
+    client = MetaClient(tmp_path, cap="0.04", max_attempts=1)
     with pytest.raises(APIStatusError):
         client.chat("first")
     with pytest.raises(SpendLimit):
         client.chat("second")
     assert len(calls) == 1  # No hidden SDK retry.
-    assert client.guard.summary()["reserved_usd"] == .25
+    assert client.guard.summary()["reserved_usd"] == float(client.estimate(dict(
+        model=module.SPARK, messages=[dict(role="user", content=[dict(type="text", text="first")])],
+        max_completion_tokens=8192)))
     assert not list(tmp_path.glob("*.json"))
 
 
@@ -75,14 +82,17 @@ def test_zero_cap_can_use_cache_but_cannot_make_a_call(tmp_path, monkeypatch):
 
 
 def test_decimal_budget_and_invalid_limits():
-    guard = SpendGuard("0.3", "0.1")
+    guard = SpendGuard("0.3")
     for _ in range(3):
-        guard.reserve()
+        guard.reserve("0.1")
     with pytest.raises(SpendLimit):
-        guard.reserve()
-    for cap, estimate in [("NaN", 1), ("Infinity", 1), (-1, 1), (2, 0), (2, "NaN"), (2, -1)]:
+        guard.reserve("0.1")
+    for cap in ("NaN", "Infinity", -1):
         with pytest.raises(ValueError):
-            SpendGuard(cap, estimate)
+            SpendGuard(cap)
+    for estimate in (0, "NaN", -1):
+        with pytest.raises(ValueError):
+            SpendGuard(2).reserve(estimate)
 
 
 def test_hashes_cover_model_images_schema_and_namespace():
@@ -228,3 +238,126 @@ def test_tool_chat_rejects_incomplete_or_malformed_messages(tmp_path,monkeypatch
     mock_api(monkeypatch,lambda r:httpx.Response(200,json=raw))
     with pytest.raises(ResponseError):
         MetaClient(tmp_path).tool_chat([dict(role='user',content='x')],[])
+
+
+@pytest.mark.parametrize("model,expected", [(module.SPARK, "0.001235"), (module.WONDER, "0.004480")])
+def test_token_tariffs(model, expected):
+    usage = dict(input_tokens=1000, cached_input_tokens=400, output_tokens=100)
+    assert usage_cost(model, usage) == Decimal(expected)
+    assert usage_cost(module.SAM, {}, images=5) == Decimal("0.0125")
+
+
+def test_usage_reconciles_and_cache_does_not_bill_again(tmp_path, monkeypatch):
+    raw = completion()
+    raw["usage"] = dict(prompt_tokens=1000, completion_tokens=100, total_tokens=1100,
+                        prompt_tokens_details=dict(cached_tokens=400))
+    mock_api(monkeypatch, lambda r: httpx.Response(200, json=raw))
+    client = MetaClient(tmp_path)
+    assert client.guard.cap == 3
+    client.chat("cost")
+    assert client.guard.reserved == Decimal("0.001235")
+    client.chat("cost")
+    u = client.summary()["usage"]
+    assert u["cost_usd"] == .001235 and u["cache_hits"] == 1 and u["paid_calls"] == 1
+    assert u["input_tokens"] == 2000 and u["cached_input_tokens"] == 800
+    assert u["by_model"][module.SPARK]["calls"] == 2
+    replay = MetaClient(tmp_path, replay=True, cap=0)
+    replay.chat("cost")
+    assert replay.summary()["usage"]["cost_usd"] == 0
+    assert replay.summary()["usage"]["output_tokens"] == 100
+
+
+def test_unreported_usage_keeps_estimate_and_is_explicit(tmp_path, monkeypatch):
+    mock_api(monkeypatch, lambda r: httpx.Response(200, json=completion()))
+    client = MetaClient(tmp_path)
+    client.chat("unreported")
+    u = client.usage_summary()
+    assert u["cost_usd"] == 0 and u["unreported_usage_calls"] == 1
+    assert u["unresolved_usd"] == float(client.guard.reserved) > 0
+
+
+@pytest.mark.parametrize("failure", [429, 500, 503, "timeout"])
+def test_retryable_errors_back_off_and_account_each_attempt(tmp_path, monkeypatch, failure):
+    requests = []
+    def handler(request):
+        requests.append(request)
+        if len(requests) == 1:
+            if failure == "timeout":
+                raise httpx.ReadTimeout("offline", request=request)
+            return httpx.Response(failure, json=dict(error=dict(message="offline")))
+        raw = completion()
+        raw["usage"] = dict(prompt_tokens=10, completion_tokens=2, total_tokens=12)
+        return httpx.Response(200, json=raw)
+    mock_api(monkeypatch, handler)
+    client = MetaClient(tmp_path)
+    assert client.chat("retry") == "hello"
+    u = client.usage_summary()
+    assert len(requests) == client.guard.calls == 2 and u["failed_calls"] == 1
+    assert u["unresolved_usd"] > u["cost_usd"] > 0
+    assert float(client.guard.reserved) == pytest.approx(u["cost_usd"] + u["unresolved_usd"])
+
+
+def test_retries_obey_cap_before_another_request(tmp_path, monkeypatch):
+    requests = []
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(503, json=dict(error=dict(message="offline")))
+    mock_api(monkeypatch, handler)
+    client = MetaClient(tmp_path, cap="0.04")
+    with pytest.raises(SpendLimit):
+        client.chat("retry")
+    assert len(requests) == 1 and client.usage_summary()["failed_calls"] == 1
+
+
+def test_client_errors_are_not_retried(tmp_path, monkeypatch):
+    requests = []
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(400, json=dict(error=dict(message="invalid")))
+    mock_api(monkeypatch, handler)
+    with pytest.raises(APIStatusError):
+        MetaClient(tmp_path).chat("bad")
+    assert len(requests) == 1
+
+
+def test_reservations_follow_prompt_and_image_size(tmp_path):
+    import io
+    from PIL import Image
+    def payload(text, size=None):
+        content = [dict(type="text", text=text)]
+        if size:
+            png = io.BytesIO()
+            Image.new("RGB", size).save(png, format="PNG")
+            content.append(dict(type="image_url", image_url=dict(url=module.image_data_url(png.getvalue()))))
+        return dict(model=module.SPARK, messages=[dict(role="user", content=content)], max_completion_tokens=64)
+    client = MetaClient(tmp_path)
+    assert client.estimate(payload("x")) < client.estimate(payload("x" * 1000))
+    assert client.estimate(payload("x", (100, 100))) < client.estimate(payload("x", (1000, 1000)))
+    assert client.estimate(payload("x", (100, 100))) < Decimal("0.01")
+    assert client.estimate(dict(model=module.SAM, input=[dict(type="input_image", image_url="data:,a")])) == Decimal("0.0025")
+
+
+def test_key_only_comes_from_environment(tmp_path, monkeypatch):
+    env = tmp_path / "env"
+    env.write_text('# no shell evaluation\nOTHER=ignored\nMODEL_API_KEY="offline-file-key"\n')
+    monkeypatch.setenv("AKSHARA_ENV_FILE", str(env))
+    with pytest.raises(MissingKey, match="MODEL_API_KEY missing"):
+        load_api_key()
+    monkeypatch.setenv("MODEL_API_KEY", "offline-env-key")
+    assert load_api_key() == "offline-env-key"
+    monkeypatch.delenv("MODEL_API_KEY")
+    env.write_text("OTHER=not-a-key\n")
+    with pytest.raises(MissingKey, match="MODEL_API_KEY missing"):
+        load_api_key()
+
+
+def test_default_env_file_is_not_read(tmp_path, monkeypatch):
+    monkeypatch.delenv("AKSHARA_ENV_FILE", raising=False)
+    directory = tmp_path / ".config/akshara"
+    directory.mkdir(parents=True)
+    (directory / "env").write_text("MODEL_API_KEY=offline-default-key\n")
+    expanduser = module.Path.expanduser
+    monkeypatch.setattr(module.Path, "expanduser", lambda p: directory / "env"
+                        if str(p) == "~/.config/akshara/env" else expanduser(p))
+    with pytest.raises(MissingKey, match="MODEL_API_KEY missing"):
+        load_api_key()

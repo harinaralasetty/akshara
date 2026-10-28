@@ -112,7 +112,7 @@ footer{flex-direction:column}
 <header><div><div class="brand"><span lang="te">అక్షర</span>Akshara</div><p class="tagline">Read with evidence.</p></div><div class="edition">Telugu document reader · Local demo</div></header>
 <main>
 <div class="intro"><div><h1>The page is the source.</h1><p>Recover Telugu text, inspect the reading, and follow every cited fact back to its exact region.</p></div><div class="picker"><label for="documents">Processed document</label><select id="documents"><option value="">Choose a document</option></select></div></div>
-<details id="run-panel"><summary>Process a demo PDF</summary><form id="run-form" class="run-form"><div class="pdf-field"><label for="pdf-path">PDF path under data/</label><input id="pdf-path" placeholder="demo/ap_2026_I-1.pdf" value="demo/ap_2026_I-1.pdf" required></div><div><label for="run-mode">Model mode</label><select id="run-mode"><option value="fake">Fake · offline</option><option value="replay">Replay · cached</option><option value="live">Live · paid API</option></select></div><div><label for="max-pages">Max pages</label><input id="max-pages" type="number" min="1" value="2" required></div><button id="run-button" class="primary">Process PDF</button></form><p class="hint">Fake mode keeps local recovery and abstains on model reads. Replay needs recorded responses. Live uses MODEL_API_KEY from the server environment and the existing USD 2 request budget.</p></details>
+<details id="run-panel"><summary>Process a demo PDF</summary><form id="run-form" class="run-form"><div class="pdf-field"><label for="pdf-path">PDF path under data/</label><input id="pdf-path" placeholder="demo/ap_2026_I-1.pdf" value="demo/ap_2026_I-1.pdf" required></div><div><label for="run-mode">Model mode</label><select id="run-mode"><option value="fake">Fake · offline</option><option value="replay">Replay · cached</option><option value="live">Live · paid API</option></select></div><div><label for="max-pages">Max pages</label><input id="max-pages" type="number" min="1" value="2" required></div><button id="run-button" class="primary">Process PDF</button></form><p class="hint">Fake mode keeps local recovery and abstains on model reads. Replay needs recorded responses. Live uses the server key and a default USD 3 run cap. For the SYNTHETIC glyph demo, enter demo/glyph_demo_SYNTHETIC_ap_2026_I-1.pdf.</p></details>
 <div id="status" class="status" role="status" aria-live="polite"></div>
 <div id="notice" class="notice" hidden></div>
 <div class="workspace">
@@ -181,7 +181,7 @@ async function listDocuments(selected = '') {
   $('documents').replaceChildren(element('option', 'Choose a document'));
   $('documents').firstChild.value = '';
   for (const doc of docs) {
-    const label = doc.document + (doc.simulated ? ' · simulated' : '') +
+    const label = doc.document + (doc.synthetic ? ' · SYNTHETIC' : '') + (doc.simulated ? ' · simulated' : '') +
       (!doc.complete ? ' · incomplete' : '');
     const option = element('option', label);
     option.value = doc.id;
@@ -255,6 +255,7 @@ function showPage(number, focus = null) {
   clearEvidence();
   $('page-title').textContent = 'Page ' + number;
   $('page-badges').replaceChildren(badge(currentPage.route, 'route'), badge(currentPage.verification.status));
+  if (report.synthetic) $('page-badges').prepend(badge('SYNTHETIC', 'UNCERTAIN'));
   for (const button of $('pages').children) {
     const active = Number(button.dataset.page) === number;
     button.classList.toggle('active', active);
@@ -312,6 +313,9 @@ function emptyViewer(message) {
 
 function renderReport() {
   const notes = [];
+  if (report.synthetic) {
+    notes.push('SYNTHETIC · Telugu ToUnicode maps were removed from a public demo page to demonstrate glyph-ID recovery. This is a modified PDF.');
+  }
   if (report.simulated) {
     notes.push('SIMULATED · Model reads abstain in fake mode. Native and glyph recovery still run; verification remains UNCERTAIN.');
   }

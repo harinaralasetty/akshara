@@ -113,3 +113,30 @@ def test_manifest_requires_complete_allowlist(fetcher, corpus, tmp_path):
     with pytest.raises(ValueError, match="Missing demo document"):
         fetcher.fetch_docs(manifest, tmp_path / "demo", source_root=source)
     assert not (tmp_path / "demo").exists()
+
+
+def test_synthetic_generator_preserves_page_and_labels_web_report(tmp_path, survey_root):
+    from fastapi.testclient import TestClient
+    from scripts.make_glyph_demo import make_demo
+    from akshara.web.app import create_app
+
+    path, telugu = make_demo(survey_root / "ap_2026_I-1.pdf", tmp_path / "data")
+    assert "SYNTHETIC" in path.name and telugu > 0
+    with fitz.open(path) as derived, fitz.open(survey_root / "ap_2026_I-1.pdf") as source:
+        assert all("SYNTHETIC" in derived.metadata[k] for k in ("title", "subject", "keywords"))
+        # Preserve drawing commands/fonts; MuPDF rasterization need not be byte-identical
+        # after stripping a text map and rebuilding the PDF resource graph.
+        assert derived[0].rect == source[1].rect
+        assert derived[0].read_contents() == source[1].read_contents()
+        assert [derived.extract_font(f[0])[3] for f in derived[0].get_fonts()] == [
+            source.extract_font(f[0])[3] for f in source[1].get_fonts()]
+    # Renaming cannot hide the metadata disclosure in the web viewer.
+    renamed = path.with_name("renamed.pdf")
+    renamed.write_bytes(path.read_bytes())
+    app = create_app(data_root=renamed.parent, runs_root=tmp_path / "runs", cache_dir=tmp_path / "cache")
+    with TestClient(app) as client:
+        response = client.post("/api/run", json=dict(path=renamed.name, mode="fake", max_pages=1))
+        assert response.status_code == 200, response.text
+        report = response.json()["report"]
+        assert report["synthetic"] and report["pages"][0]["route"] == "glyph_id"
+        assert client.get("/api/documents").json()[0]["synthetic"]

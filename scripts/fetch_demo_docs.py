@@ -92,9 +92,15 @@ def main(argv=None):
     parser.add_argument("--output-dir", type=Path, default=ROOT / "data/demo")
     parser.add_argument("--from-local", action="store_true", help="Copy verified sibling corpus files without network")
     parser.add_argument("--source-root", type=Path, default=ROOT.parent / "telugu-m0")
+    parser.add_argument("--glyph-demo", action="store_true", help="Also generate the labelled SYNTHETIC glyph demo")
     args = parser.parse_args(argv)
     results = fetch_docs(args.manifest, args.output_dir,
                          source_root=args.source_root if args.from_local else None)
+    if args.glyph_demo:
+        from scripts.make_glyph_demo import make_demo
+        path, _ = make_demo(args.output_dir / "ap_2026_I-1.pdf", args.output_dir)
+        result = triage_pdf(path)
+        results.append(dict(file=path.name, label=result["label"], pages=len(result["pages"])))
     for item in results:
         print(f"{item['file']}: {item['label']} ({item['pages']} pages)")
     coverage = Counter(item["label"] for item in results)

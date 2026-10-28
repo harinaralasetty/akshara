@@ -1,0 +1,18 @@
+{"document":"ap_2026_I-1.pdf","page":2,"field":"title","question":"On PDF page 2, what is the Telugu heading above CONTENTS? Quote only that heading.","answer":""}
+{"document":"ap_2026_I-1.pdf","page":2,"field":"year_range","question":"On PDF page 2, what financial-year range appears in the English financial-position summary heading? Quote the range including its account and budget qualifiers.","answer":""}
+{"document":"ap_2026_v5.pdf","page":2,"field":"budget_year","question":"On PDF page 2, what budget year is printed at the top? Quote only the year as printed.","answer":""}
+{"document":"ap_2026_v5.pdf","page":2,"field":"title","question":"On PDF page 2, what is the Telugu title of this volume? Quote the title without the minister's name.","answer":""}
+{"document":"ap_annex_25-26.pdf","page":2,"field":"budget_year","question":"On PDF page 2, what budget year is printed at the top? Quote only the year as printed.","answer":""}
+{"document":"ap_gazette_2014.pdf","page":1,"field":"title","question":"On PDF page 1, what is the main title of the publication? Quote the visible title.","answer":""}
+{"document":"ap_gazette_2014.pdf","page":1,"field":"date","question":"On PDF page 1, what publication date is printed? Quote the date exactly; abstain if none is legible.","answer":""}
+{"document":"mcr_rti.pdf","page":1,"field":"title","question":"On PDF page 1, what is the Telugu title of the Act, including the year? Quote only that title and year.","answer":""}
+{"document":"mcr_rti.pdf","page":1,"field":"office","question":"On PDF page 1, which commission is named below the title? Quote its name in Telugu.","answer":""}
+{"document":"neredcherla_rti.pdf","page":1,"field":"title","question":"On PDF page 1, what is the main Telugu title? Quote the title as printed.","answer":""}
+{"document":"court_telugu_2024.pdf","page":1,"field":"title","question":"On PDF page 1, what document title is visible? Quote the title; abstain if it is not legible.","answer":""}
+{"document":"ecourts_telugu_2021.pdf","page":1,"field":"office","question":"On PDF page 1, which body is named as the publisher? Quote the publisher text as printed.","answer":""}
+{"document":"law_telugu_1956.pdf","page":1,"field":"title","question":"On PDF page 1, what is the title of the law, including any year printed with it? Quote the title and year as printed.","answer":""}
+{"document":"ceots_form6.pdf","page":1,"field":"reference_number","question":"On PDF page 1, what form number is printed in the heading? Quote the form identifier as printed.","answer":""}
+{"document":"ceots_form6.pdf","page":2,"field":"heading","question":"On PDF page 2, what heading introduces the applicant's declaration, if present? Quote only the heading; abstain if absent or illegible.","answer":""}
+{"document":"ts_legislature.pdf","page":1,"field":"department","question":"On PDF page 1, what English name follows the demand number? Quote only that name.","answer":""}
+{"document":"ts_legislature.pdf","page":1,"field":"name","question":"On PDF page 1, who is named above Deputy Chief Minister? Quote the English name as printed.","answer":""}
+{"document":"archive_dathumala.pdf","page":1,"field":"title","question":"On PDF page 1, what title is visible? Quote the title as printed; abstain if the page has no legible title.","answer":""}

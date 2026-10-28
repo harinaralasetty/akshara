@@ -1,209 +1,151 @@
+<div align="center">
+
 # Akshara
 
-Akshara recovers Telugu text from PDF text layers, independently reads page images
-with Meta models, and extracts facts with page/region evidence. The local web demo
-lets you inspect those regions and ask questions whose answers quote the evidence.
-Python 3.13; use the existing `.venv`. No added dependencies.
+### Read difficult Telugu PDFs with page evidence and explicit uncertainty.
+
+**A verifying reading agent for Telugu government PDFs.** Legacy fonts, missing Unicode maps, scanned pages, structured facts and document questions, with evidence you can inspect on the page.
+
+[**Quick start**](#quick-start) · [Why Akshara](#why-akshara) · [What it does](#what-it-does) · [How it works](#how-it-works) · [FAQ](#faq) · [Docs](#documentation) · [MIT license](LICENSE)
 
 ```sh
-# Download only the twelve public, non-personal demo documents.
-# Run this outside an offline sandbox.
-.venv/bin/python scripts/fetch_demo_docs.py
+uv pip install --python .venv -r requirements.txt
+```
 
-# Offline alternative, if the optional local survey corpus is installed:
-.venv/bin/python scripts/fetch_demo_docs.py --from-local
+Python 3.13 and uv; glyph-engine setup is below. Use the existing environment for offline work.
 
-.venv/bin/python -m akshara triage data/demo/ts_legislature.pdf
-.venv/bin/python -m akshara run data/demo/ts_legislature.pdf --max-pages 2 --fake
+</div>
+
+> [!NOTE]
+> Live Meta API behavior is **unverified until a key is used successfully**. Offline tests check request shapes and application behavior; fake model reads abstain. Recovery coverage and reader agreement do not establish reading accuracy. Human-labelled field accuracy is still pending.
+
+## Why Akshara
+
+A Telugu PDF can look readable while copying, searching or feeding it to a chatbot produces broken text.
+
+- **Route each page.** Native text, glyph IDs, legacy fonts and scans need different recovery paths, even within one document.
+- **Inspect the source.** Recovered spans, accepted records and answers retain page numbers and bounding boxes you can highlight in the web viewer.
+- **Keep uncertainty visible.** Independent image reads can verify or correct recovery; unresolved disagreement stays UNCERTAIN. Unsupported answers abstain.
+- **Rehearse offline.** Fake mode runs local recovery without a key. Replay uses recorded real requests without making new API calls.
+
+## Quick start
+
+Run commands from this repository's root. The hackathon environment already has `.venv` and the required packages; **skip installation there**. For a fresh checkout, use Python 3.13 and uv:
+
+```sh
+uv venv --python 3.13 .venv
+uv pip install --python .venv -r requirements.txt
+# Install the pre-existing glyph engine at the revision used by this build.
+# --no-deps avoids its unused translation/OCR application dependencies.
+uv pip install --python .venv --no-deps "legacylipi @ git+https://github.com/harinaralasetty/indic-legacy-pdf.git@6043fd5ed7a4448bbe94c77e7cf36ff096d07334"
+```
+
+These installation commands require network access or populated local package caches. No packages were installed during the offline build. [requirements.txt](requirements.txt) records the existing environment's package versions; the glyph dependency is installed separately.
+
+**Prepare public demo PDFs**, if the optional local survey corpus is available:
+
+```sh
+.venv/bin/python scripts/fetch_demo_docs.py --from-local --glyph-demo
+```
+
+If the twelve public PDFs are already in `data/demo/`, create just the derivative:
+
+```sh
+.venv/bin/python scripts/make_glyph_demo.py
+```
+
+**Use** the CLI and local web demo:
+
+```sh
+.venv/bin/python -m akshara triage data/demo/glyph_demo_SYNTHETIC_ap_2026_I-1.pdf
+.venv/bin/python -m akshara eval --mode fake --docs data/demo
 .venv/bin/python -m akshara serve --port 8000
-# Open http://127.0.0.1:8000
+```
 
+Open `http://127.0.0.1:8000`. Pick a processed document, select a page and click a text region to inspect its evidence. Evaluation prepares the document reports the viewer lists. You can also process an existing PDF under `data/` from the web form. The web demo uses existing local files; there is no upload step.
+
+<details>
+<summary><b>Modes, flags, demo preparation and output rules</b></summary>
+
+<br>
+
+- `run PDF --fake --max-pages 2` recovers selected pages into `runs/<pdf-stem>/report.json` with page PNGs. Without `--max-pages`, `run` processes the whole document.
+- `eval --mode fake|replay|live --docs data/demo` defaults to fake and the first two pages per document. It writes `runs/eval/report.md` and `metrics.json`. `--labels eval/labels.jsonl` supplies human answers; blank slots are ignored.
+- Fake mode keeps native/glyph recovery real, marks model work simulated and leaves verification UNCERTAIN. It invents no records or answers. Scripted tests cover successful extraction and cited answers separately.
+- CLI `run --replay` and eval/web replay need exact cached real requests. A miss fails that document; replay never falls back to live. Fake and real cache namespaces are isolated.
+- Live `run` (neither `--fake` nor `--replay`), `eval --mode live`, and web live mode read `MODEL_API_KEY` **only from the process environment**. Export it in the shell that starts the CLI/server. Never put keys in the UI, repository or command history.
+- `--cap-usd` defaults to 3 for run/eval; eval shares that cap across documents and label questions. `--cache-dir` defaults to `cache/`. Web run/ask requests default to fake and two selected pages for processing.
+- Live calls reserve a request-size estimate, then reconcile reported usage against configured model tariffs. Failed or unreported calls keep unresolved reservations. SDK retries are disabled; bounded application retries reserve each attempt. Cache hits and fake calls incur no new charge. This is application-side accounting, not a provider billing limit.
+- `python -m akshara smoke` makes three small uncached live probes (text, image, SAM) with no retries. Without an environment key it exits 1 before opening a PDF or constructing an API client. It defaults to a crop of page 2 of `ap_2026_I-1.pdf`.
+- In a network-enabled setup, `scripts/fetch_demo_docs.py --glyph-demo` fetches only the twelve public files in the [manifest](scripts/demo_docs.csv). Downloads and local copies are SHA256 checked. The bundled manifest works without the private survey CSV; online source availability has not been verified here.
+- `--from-local` uses the optional sibling survey corpus; `--source-root`, `--manifest` and `--output-dir` override its locations. The synthetic derivative is generated separately from one public page and labelled in its filename, metadata and UI.
+- Repeating a run replaces its report and referenced images. `complete` covers selected pages; `truncated` records a page limit. Failures preserve an incomplete report. Eval returns nonzero if any document is incomplete.
+- Pages are 1-based. Boxes use unrotated, crop-relative PDF points with a top-left origin. The viewer handles page rotation and revisions when highlighting citations.
+- Data, PDFs, caches, run outputs and secrets stay untracked. The localhost server accepts paths only under `data/` and serializes processing/questions.
+
+</details>
+
+## What it does
+
+| Area | Behavior |
+| --- | --- |
+| **Triage** | Per-page `unicode_ok`, `glyph_id`, `legacy_font`, `scanned` or `unclear` routes from text, images and font resources. |
+| **Recovery** | Native text or pre-existing legacylipi glyph/mapping recovery; unsupported legacy fonts and scans use image reading in live mode. |
+| **Verification** | Muse Spark reads the page without seeing recovered text; disagreement triggers an independent Muse Wonder read. Conservative comparison yields VERIFIED, CORRECTED or UNCERTAIN. |
+| **Regions and records** | SAM 3.1 scan regions; structured document types, offices, dates, amounts, references and table rows. Accepted records cite literal supporting text and derived boxes. |
+| **Questions** | A bounded tool-calling agent searches records, recovers saved pages, reads crops and segments regions. Answers quote returned evidence with citations or abstain. |
+| **Web demo** | Route/status badges, page images, span/region overlays, records and answer citations. Synthetic and simulated results are labelled. |
+| **Evaluation** | Per-document and per-route page counts, Telugu characters, text coverage, verification counts and usage cost per page; optional exact-match field questions. |
+
+The public allowlist has twelve source PDFs: budgets, laws/notices, a blank form and an archive document. Adding the synthetic glyph example makes thirteen demo files. Document-level routes can differ from the routes of the first two pages selected by eval. This allowlist has no naturally occurring glyph-ID document under the current rules.
+
+## How it works
+
+Akshara inspects each page's text layer and embedded fonts, then selects a recovery path. Independent image readers check the result without receiving the recovered text. Extraction validates quoted evidence, and the question agent can only return quotes from evidence its tools actually retrieved.
+
+The viewer keeps the page image beside that evidence. Scanned pages can receive SAM regions and saved crops; region geometry alone never supports a textual answer. All model calls pass through one cache, usage ledger and spend guard in [meta_client.py](akshara/meta_client.py).
+
+**Pre-existing dependency:** [legacylipi / indic-legacy-pdf](https://github.com/harinaralasetty/indic-legacy-pdf) supplies glyph-ID reverse shaping and packaged legacy mappings. Akshara integrates that earlier work; it does not claim the recovery engine as a hackathon contribution. The local survey data also predates this repo and is not included. New work here began on **2026-10-28**; see [hackathon provenance and demo script](docs/HACKATHON.md).
+
+Limits matter: reverse shaping can return a possible spelling, reader agreement can share an error, and vision boxes are estimates. The installed dependency has no supported packaged Telugu legacy mapping; those pages use vision. A `unicode_ok` route is a heuristic and may still contain damaged text. The pipeline targets ordinary horizontal text; complex layout needs manual review. More detail is in the [build spec](docs/SPEC.md) and [evaluation guide](docs/EVALUATION.md).
+
+## FAQ
+
+**Can I run it without a Meta key?** Yes: fake mode runs offline and keeps local recovery real. Model work abstains. Real replay also needs no key, but requires previously recorded requests; recordings are not bundled.
+
+**Does fake mode prove the models work?** No. Offline tests validate request/response handling, citations and failure paths. Live Meta behavior and reading accuracy remain unverified until a key is used and the outputs are reviewed.
+
+**Is VERIFIED a guarantee?** No. It means conservative agreement between recovered text and an independent image read. Two readers can share an error. Check the cited source before relying on a fact.
+
+**Does it translate or calculate answers?** The current question agent selects literal quotes from retrieved evidence. It does not synthesize free-form translations or unsupported calculations. Missing support produces “I cannot verify an answer”.
+
+**What is synthetic in the demo?** Only the labelled glyph derivative: Telugu ToUnicode maps are removed from page 2 of a public budget. Its rendered page is retained; the damaged text layer is intentional. Fake model activity is separately labelled simulated.
+
+**What gets sent to Meta?** Live mode sends page images/crops and task text; extraction and question requests include recovered evidence. Fake and replay do not send API requests. Use only public, non-personal demo documents. Responses and usage are cached locally in ignored directories.
+
+**Where are the accuracy numbers?** They are pending human annotation. The [label template](eval/labels.template.jsonl) has 18 questions with empty answers. Eval reports “Not evaluated” until filled labels are available; character coverage is not reading accuracy.
+
+## Documentation
+
+- [Build spec and architecture](docs/SPEC.md)
+- [Evaluation modes, metrics and human labels](docs/EVALUATION.md)
+- [Hackathon provenance, judging criteria and three-minute demo script](docs/HACKATHON.md)
+- [Public demo manifest](scripts/demo_docs.csv) · [Glyph demo generator](scripts/make_glyph_demo.py)
+- [Agent instructions](AGENTS.md)
+
+## Contributing
+
+Read [AGENTS.md](AGENTS.md) and [docs/SPEC.md](docs/SPEC.md). Keep modules small, add no dependencies, and use fake clients or replay for tests. Tests block network connections. Do not commit PDFs, data, caches, runs, secrets, personal data or absolute local paths.
+
+```sh
 .venv/bin/python -m pytest -q
 AKSHARA_SKIP_SURVEY=1 .venv/bin/python -m pytest -q
 ```
 
-The viewer lists documents in `runs/`. Pick one, click a page, and click a span,
-SAM region, record citation, or answer citation to highlight its source. Page
-badges show the recovery route and VERIFIED / CORRECTED / UNCERTAIN status.
-Process a PDF by entering its path under `data/`, choosing fake, replay, or live,
-and setting the maximum pages. The default is two pages. The server binds to
-localhost and accepts existing PDFs under `data/`; there is no upload step.
+The second command skips optional tests that inspect locally prepared public demo PDFs. Core tests generate their own fixtures and do not need the survey corpus.
 
-Fake mode needs no API key or network. It uses real native/glyph recovery and
-marks model work as simulated. Default fake reads abstain and produce no invented
-records or answers. Scripted `FakeClient` tests exercise successful extraction and
-cited answers. Replay needs an exact recorded request. Live makes paid calls and
-reads `MODEL_API_KEY` only from the server environment. There are no external
-scripts, styles, fonts, or build steps in the viewer.
+## License
 
-## Demo documents
+[MIT](LICENSE). Dependencies retain their own licenses.
 
-The fixed allowlist contains budgets, public laws/notices, a blank form, and an
-archive document. The fetcher reads `file`, `url`, and `sha256` from
-`data/m0b_results.csv` when present. A checked-in, sanitized twelve-row fallback
-lives in `scripts/demo_docs.csv`, so a public checkout does not need the private
-survey or its CSV. `--manifest` can select either CSV explicitly. Downloads and
-local copies are checksum verified before an atomic replacement; valid existing
-files are reused. PDFs remain ignored in `data/demo/`.
-
-`--from-local` copies only these same twelve files from the optional sibling
-survey corpus. `--source-root` and `--output-dir` can override those locations.
-The script prints actual triage results, never labels copied from the CSV.
-
-| Demo PDF | Actual document route |
-| --- | --- |
-| ap_2026_I-1.pdf | unicode_ok |
-| ap_2026_v5.pdf | legacy_font |
-| ap_annex_25-26.pdf | legacy_font |
-| ap_gazette_2014.pdf | scanned |
-| mcr_rti.pdf | legacy_font |
-| neredcherla_rti.pdf | scanned |
-| court_telugu_2024.pdf | legacy_font |
-| ecourts_telugu_2021.pdf | unicode_ok |
-| law_telugu_1956.pdf | scanned |
-| ceots_form6.pdf | unclear |
-| ts_legislature.pdf | unicode_ok |
-| archive_dathumala.pdf | unclear |
-
-This allowlist covers legacy, Unicode, scanned and unclear documents. It contains
-**no naturally glyph-ID-routed document** under the current triage rules. The
-glyph regression test deliberately removes ToUnicode from a temporary copy of a
-public demo document; that modified file is never published as an original demo.
-The AP Finance URLs contain literal `...Bud@et` path segments in the source CSV.
-They are preserved verbatim; online source availability has not been checked in
-the sandbox. Local copying verifies the same expected bytes.
-
-## Document questions
-
-`akshara.agent.ask(report_path, question, client, max_steps=6)` reads one saved
-report and its page PNGs. It uses Muse Spark's Chat Completions function tools,
-preserving assistant tool calls and matching tool-result IDs as in the Meta
-cookbook. All calls go through the existing client cache and spend guard.
-
-- `search_records(query)` finds records by literal substring and returns quotes.
-- `recover_page(page)` returns the saved recovered spans.
-- `read_region(page, bbox)` crops the saved PNG and asks Spark to read it. New
-  reads are UNCERTAIN until independently verified.
-- `segment(page, concept)` asks SAM 3.1 for regions. Geometry alone cannot support
-  a textual answer; the agent must read the region or recover its page.
-
-The default limit is six model turns, with at most four tool calls per turn.
-The final response selects literal quotes from evidence actually returned by
-these tools. The application builds the answer from those validated quotes and
-derives page, bbox, source and verification from the evidence. Free-form prose,
-partial number tokens, invented quotes, unseen citations and exhausted limits produce "I cannot verify
-an answer". These are conservative extractive answers; they do not translate,
-calculate or synthesize unsupported claims. Simulated evidence stays UNCERTAIN.
-
-The local HTTP endpoints are:
-
-| Method | Path | Payload / result |
-| --- | --- | --- |
-| GET | `/api/documents` | List processed documents |
-| GET | `/api/documents/{document}/report` | Saved report |
-| GET | `/api/documents/{document}/pages/{page}/image` | Saved page PNG |
-| POST | `/api/run` | `{ "path": "demo/ts_legislature.pdf", "mode": "fake", "max_pages": 2 }` |
-| POST | `/api/ask` | `{ "document": "ts_legislature", "question": "What amounts are listed?", "mode": "fake", "max_steps": 6 }` |
-
-Run and ask requests default to fake mode. Replay uses cached real responses;
-missing cache entries return HTTP 409. Spend-limit errors also return 409. Live
-requires an environment key. A run returns its
-document ID and report; ask returns `answer`, `citations`, `abstained`, `steps`,
-and `simulated`. PDF, report and image paths are restricted to their roots,
-including symlinks. Reports include a content revision; the viewer supplies it
-with image and ask requests so a rerun cannot silently invalidate citations.
-The local demo processes one run or question at a time.
-
-## Recovery and verification
-
-A run writes `runs/<pdf-stem>/report.json`, `page-NNN.png`, and SAM region crops
-for scan pages. Repeating a run replaces the report and its referenced images.
-Only images referenced in the current report belong to that run. `complete`
-means all **selected** pages finished; `truncated` identifies `--max-pages` runs.
-Failures retain a report with `complete: false` and the exception type.
-
-Triage uses font resources, embedded cmaps, ToUnicode, text fractions, and
-actually displayed images. Per-page routes are `unicode_ok`, `glyph_id`,
-`legacy_font`, `scanned`, and `unclear`. Document rules aggregate font evidence
-with legacy > glyph > Unicode precedence. Empty vector outlines are unclear;
-an image-only page is scanned. The optional survey check reads its
-`classification` column only as the expected answer, never as a triage signal.
-Legacy labels are routing candidates, not proof of a visually correct mapping.
-
-**Pre-existing dependency:** `legacylipi`, Hari's indic-legacy-pdf project,
-supplies glyph-ID recovery and its packaged legacy mappings. This work does not
-claim that dependency as new hackathon work. `recover_pdf(..., page_numbers={...})`
-returns positioned text; Akshara preserves its inference warnings. Reverse
-shaping yields a possible original string, not proof of original spelling.
-The installed package's Telugu Priyaanka mapping is a separate research
-prototype, not a supported mapping API. Unsupported Telugu legacy fonts use
-vision; Shree-Tel is never passed through the Devanagari Shree-Dev mapping.
-
-A Spark verification read receives the image and no recovered text. Pure local
-comparison checks numeric tokens, dates, references, currency/amount tokens,
-and all word content, a conservative check covering names. Whitespace and
-Unicode decimal digit variants are normalized. Full agreement is VERIFIED;
-otherwise Wonder reads independently, also without prior text. Agreement
-between both image readers replaces recovery with CORRECTED text and retains
-the original spans. Other conflicts, empty reads, and illegibility remain
-UNCERTAIN. Verification is page-wide and deliberately conservative: spelling,
-line order, or token-boundary differences can make the entire page uncertain.
-Agreement is evidence, not ground truth; two readers can share an error.
-
-Extraction uses JSON Schema for document type, office, dates, amounts, reference
-numbers, and table rows. Every accepted record has a literal quote, supporting
-span IDs, a derived page/bbox, and the weakest supporting verification status.
-Unsupported quotes/values/IDs are rejected with reasons. An inferred document
-type remains UNCERTAIN unless its value also appears in the evidence.
-
-Pages are 1-based; boxes use unrotated, crop-relative PDF points with top-left
-origin, matching PyMuPDF text coordinates. Reports include unrotated bounds and
-page rotation so the viewer and cropped reads align evidence with the image.
-Vision boxes are converted from normalized image coordinates; SAM boxes come
-from source-image pixels. Scan pages segment text blocks, tables, stamps and
-signatures and save cited region crops. Vision boxes remain model estimates.
-The pipeline targets ordinary horizontal text; complex reading order and
-unresolved legacy mappings can require manual review.
-
-## Model calls and cost
-
-All live requests use `https://api.meta.ai/v1`. Spark is `muse-spark-1.3`, the
-second reader is `muse-wonder-1.0`, and segmentation is `sam-3.1` through the
-Responses stream and `meta_sam_parser`, following the local Meta cookbook.
-
-`--replay` uses real cached responses only and fails on any missing request.
-It needs no key and never constructs an SDK client. The request hash includes
-model, prompt, images, schema, tools/conversation, and operation. `--cache-dir`
-defaults to `cache/`. Fake requests use a separate cache namespace and cannot
-seed a real replay.
-
-Every attempted paid call reserves a conservative USD 0.25 by default, from a
-USD 2 request cap. Configure CLI `--cap-usd` and `--call-estimate-usd`, or change
-`CALL_ESTIMATE_USD` in `akshara/meta_client.py`. SDK retries are disabled; failed
-attempts keep their reservation. Cache hits and fake reads cost zero. These
-are **estimated reservations, not measured provider charges**; the estimate
-must be kept conservative for the actual tariff and request sizes. Raw chat
-responses, including reported usage, are retained in the ignored cache.
-
-## Offline validation and optional survey
-
-Tests prohibit socket connections and use scripted FakeClient responses or HTTP
-mock transports. Generated PDF/image fixtures cover tool conversations, citation
-rejection, abstention, rotations, crops, web requests, replay, spend limits and
-checksum failure without any external corpus. Tests that inspect real demo PDFs
-skip cleanly when `data/demo/` is absent, or when `AKSHARA_SKIP_SURVEY=1` is set.
-They do not require the sibling survey folder.
-
-The full local survey check remains optional for users who have that separate
-corpus and the ignored CSV:
-
-```sh
-.venv/bin/python -m akshara check data/m0b_results.csv --pdf-root ../telugu-m0
-```
-
-No PDF fixtures, data, cache, run outputs, secrets or personal data are tracked.
-Live API behavior, reading accuracy and online download availability still need
-network-enabled evaluation. No external network calls were made during this build.
-
-By Hari Naralasetty · [GitHub](https://github.com/harinaralasetty) ·
-[LinkedIn](https://www.linkedin.com/in/harinaralasetty)
+By Hari Naralasetty · [GitHub](https://github.com/harinaralasetty) · [LinkedIn](https://www.linkedin.com/in/harinaralasetty)

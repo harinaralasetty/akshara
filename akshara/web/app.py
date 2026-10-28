@@ -12,7 +12,7 @@ from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field, field_validator
 
 from ..agent import ask
-from ..meta_client import CacheMiss, FakeClient, MetaClient, SpendLimit
+from ..meta_client import CacheMiss, FakeClient, MetaClient, MissingKey, SpendLimit
 from ..pipeline import run
 
 Mode = Literal["fake", "replay", "live"]
@@ -22,6 +22,7 @@ class RunRequest(BaseModel):
     path: str = Field(min_length=1, max_length=1000)
     mode: Mode = "fake"
     max_pages: int = Field(default=2, ge=1)
+    cap_usd: float = Field(default=3, ge=0, allow_inf_nan=False)
 
 
 class AskRequest(BaseModel):
@@ -29,6 +30,7 @@ class AskRequest(BaseModel):
     question: str = Field(min_length=1, max_length=4000)
     mode: Mode = "fake"
     max_steps: int = Field(default=6, ge=1, le=20)
+    cap_usd: float = Field(default=3, ge=0, allow_inf_nan=False)
     revision: str | None = None
 
     @field_validator("question")
@@ -64,12 +66,15 @@ def create_app(*, data_root="data", runs_root="runs", cache_dir="cache", client_
         finally:
             lock.release()
 
-    def new_client(mode):
+    def new_client(mode, cap=3):
         if client_factory:
             return client_factory(mode)
         if mode == "fake":
-            return FakeClient(cache_dir=cache_dir)
-        return MetaClient(cache_dir=cache_dir, replay=mode == "replay")
+            return FakeClient(cache_dir=cache_dir, cap=cap)
+        client = MetaClient(cache_dir=cache_dir, replay=mode == "replay", cap=cap)
+        if mode == "live":
+            client._key()
+        return client
 
     def report_path(document):
         if document in (".", "..") or Path(document).name != document:
@@ -109,6 +114,7 @@ def create_app(*, data_root="data", runs_root="runs", cache_dir="cache", client_
 
     @app.exception_handler(CacheMiss)
     @app.exception_handler(SpendLimit)
+    @app.exception_handler(MissingKey)
     async def model_limit(request, exc):
         from fastapi.responses import JSONResponse
         return JSONResponse(status_code=409, content={"detail": str(exc)})
@@ -127,6 +133,7 @@ def create_app(*, data_root="data", runs_root="runs", cache_dir="cache", client_
                 report = read_report(report_path(directory.name))
                 result.append(dict(id=directory.name, document=report.get("document", directory.name),
                                    complete=report.get("complete", False), simulated=report.get("simulated", False),
+                                   synthetic=report.get("synthetic", False),
                                    pages=len(report.get("pages", []))))
             except HTTPException:
                 continue
@@ -158,10 +165,10 @@ def create_app(*, data_root="data", runs_root="runs", cache_dir="cache", client_
         pdf = pdf_path(body.path)
         with work(), work(artifact_lock):
             try:
-                client = new_client(body.mode)
+                client = new_client(body.mode, body.cap_usd)
                 path = run(pdf, client, max_pages=body.max_pages, output_root=runs_root)
                 return dict(document=path.parent.name, report=read_report(path))
-            except (CacheMiss, SpendLimit):
+            except (CacheMiss, SpendLimit, MissingKey):
                 raise
             except Exception as exc:
                 # Provider errors may include request data or paths. Return only type.
@@ -174,8 +181,8 @@ def create_app(*, data_root="data", runs_root="runs", cache_dir="cache", client_
             if body.revision is not None and body.revision != read_report(path)["revision"]:
                 raise HTTPException(409, "Document changed; reload its report")
             try:
-                return ask(path, body.question, new_client(body.mode), max_steps=body.max_steps)
-            except (CacheMiss, SpendLimit):
+                return ask(path, body.question, new_client(body.mode, body.cap_usd), max_steps=body.max_steps)
+            except (CacheMiss, SpendLimit, MissingKey):
                 raise
             except Exception as exc:
                 raise HTTPException(400, f"Question failed: {type(exc).__name__}") from None
