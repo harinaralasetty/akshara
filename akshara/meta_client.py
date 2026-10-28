@@ -196,6 +196,41 @@ class MetaClient:
             ])])
         return self._cached("segment", payload, self._send_sam)
 
+    def _send_tool_chat(self, payload):
+        return self._send_chat(payload)
+
+    def tool_chat(self, messages, tools, *, model=SPARK):
+        """Return the full assistant message, retaining tool IDs and arguments.
+
+        Caller appends that message before its matching tool results, as required
+        by the Chat Completions conversation protocol. Only auto is supported.
+        """
+        payload = json.loads(json.dumps(dict(model=model, messages=messages, tools=tools,
+            tool_choice="auto", max_completion_tokens=MAX_COMPLETION_TOKENS), allow_nan=False))
+        result = self._cached("tool_chat", payload, self._send_tool_chat)
+        try:
+            choice = result["choices"][0]
+            message = choice["message"]
+            calls = message.get("tool_calls") or []
+            if message.get("refusal") or message.get("role") != "assistant":
+                raise ResponseError("Model refused or returned a non-assistant message")
+            if choice.get("finish_reason") == "tool_calls":
+                if not calls:
+                    raise ResponseError("Missing tool calls")
+                ids = set()
+                for call in calls:
+                    if (not isinstance(call["id"], str) or not call["id"] or call["id"] in ids
+                            or call.get("type") != "function"
+                            or not isinstance(call["function"]["name"], str)
+                            or not isinstance(call["function"]["arguments"], str)):
+                        raise ResponseError("Malformed tool call")
+                    ids.add(call["id"])
+            elif choice.get("finish_reason") != "stop" or calls or not isinstance(message.get("content"), str):
+                raise ResponseError("Model did not finish its response")
+            return {key: value for key, value in message.items() if value is not None or key == "content"}
+        except (KeyError, IndexError, TypeError, AttributeError) as exc:
+            raise ResponseError("Malformed tool response") from exc
+
     def summary(self):
         return dict(**self.guard.summary(), cache_hits=self.cache_hits, simulated=self.simulated)
 
@@ -223,6 +258,8 @@ class FakeClient(MetaClient):
             return self.responses.popleft()
         if operation == "segment":
             return dict(boxes=[], masks=[], diagnostics=[])
+        if operation == "tool_chat":
+            return dict(role="assistant", content=json.dumps(dict(abstained=True, citations=[])))
         name = payload.get("response_format", {}).get("json_schema", {}).get("name")
         if name == "page_read":
             return dict(spans=[])
@@ -237,3 +274,10 @@ class FakeClient(MetaClient):
 
     def _send_sam(self, payload):
         return self._fake("segment", payload)
+
+    def _send_tool_chat(self, payload):
+        message = self._fake("tool_chat", payload)
+        if isinstance(message, str):
+            message = dict(role="assistant", content=message)
+        return dict(choices=[dict(message=message,
+            finish_reason="tool_calls" if message.get("tool_calls") else "stop")])

@@ -8,3 +8,4 @@ runs/
 .env
 .DS_Store
 runs_r1*
+runs_r2*

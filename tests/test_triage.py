@@ -5,11 +5,10 @@ from akshara.triage import counts, triage_pdf
 
 
 @pytest.mark.parametrize("relative,label", [
-    ("pdfs/vsp_1.pdf", "glyph_id"),
-    ("pdfs2/ap_budget_2025.pdf", "legacy_font"),
-    ("pdfs2/pstu_music2023.pdf", "unicode_ok"),
-    ("pdfs2/law_telugu_1956.pdf", "scanned"),
-    ("pdfs2/ceots_form7.pdf", "unclear"),
+    ("mcr_rti.pdf", "legacy_font"),
+    ("ts_legislature.pdf", "unicode_ok"),
+    ("law_telugu_1956.pdf", "scanned"),
+    ("ceots_form6.pdf", "unclear"),
 ])
 def test_survey_categories(survey_root, relative, label):
     result = triage_pdf(survey_root / relative)
@@ -32,7 +31,7 @@ def test_blank_outlines_and_english_are_not_scans(tmp_path):
 
 
 def test_tounicode_alone_does_not_mean_unicode(survey_root):
-    result = triage_pdf(survey_root / "pdfs2/ap_budget_2025.pdf", max_pages=1)
+    result = triage_pdf(survey_root / "mcr_rti.pdf", max_pages=1)
     assert result["pages"][0]["label"] == "legacy_font"
     assert result["telugu"] == 0
 

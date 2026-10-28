@@ -26,6 +26,8 @@ def main(argv=None):
     execute.add_argument("--cap-usd", type=str, default="2")
     execute.add_argument("--call-estimate-usd", type=str, default=CALL_ESTIMATE_USD)
     execute.add_argument("--cache-dir", type=Path, default=Path("cache"))
+    serve = commands.add_parser("serve", help="Start the local web demo")
+    serve.add_argument("--port", type=int, default=8000)
     args = parser.parse_args(argv)
     try:
         if args.command == "triage":
@@ -35,6 +37,11 @@ def main(argv=None):
                 for page in result["pages"]:
                     print(f"  page {page['page']}: {page['label']}")
                 print(f"  document: {result['label']}")
+        elif args.command == "serve":
+            if not 1 <= args.port <= 65535:
+                parser.error("--port must be between 1 and 65535")
+            import uvicorn
+            uvicorn.run("akshara.web.app:app", host="127.0.0.1", port=args.port)
         elif args.command == "check":
             result = check_survey(args.csv, args.pdf_root)
             print(json.dumps(result, ensure_ascii=False, indent=2))

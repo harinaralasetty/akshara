@@ -195,3 +195,36 @@ def test_sam_sdk_stream_decodes_boxes_masks_and_caches(tmp_path, monkeypatch):
     monkeypatch.delenv("MODEL_API_KEY")
     assert MetaClient(tmp_path, replay=True).segment(b"png", "text block") == result
     assert len(calls) == 1 and client.guard.calls == 1
+
+
+def test_tool_chat_preserves_assistant_calls_and_keyless_replay(tmp_path, monkeypatch):
+    message = dict(role='assistant', content=None, tool_calls=[dict(id='c1',type='function',
+        function=dict(name='recover_page',arguments='{"page":1}'))])
+    raw=completion(None,'tool_calls'); raw['choices'][0]['message']=message
+    sent=[]
+    def handler(request):
+        sent.append(json.loads(request.content))
+        return httpx.Response(200,json=raw)
+    mock_api(monkeypatch,handler)
+    messages=[dict(role='user',content='Read page')]
+    tools=[dict(type='function',function=dict(name='recover_page',parameters=dict(type='object')))]
+    client=MetaClient(tmp_path)
+    assert client.tool_chat(messages,tools)==message
+    assert sent[0]['tool_choice']=='auto' and sent[0]['tools']==tools
+    monkeypatch.delenv('MODEL_API_KEY')
+    assert MetaClient(tmp_path,replay=True).tool_chat(messages,tools)==message
+    assert len(sent)==1
+    messages.append(message)
+    with pytest.raises(CacheMiss):
+        MetaClient(tmp_path,replay=True).tool_chat(messages,tools)
+
+
+@pytest.mark.parametrize('finish,message', [('length',dict(role='assistant',content='x')),
+    ('tool_calls',dict(role='assistant',tool_calls=[])),
+    ('tool_calls',dict(role='assistant',tool_calls=[dict(id='x',type='function',function=dict(name='x',arguments={}))])),
+    ('stop',dict(role='assistant',content='x',refusal='no'))])
+def test_tool_chat_rejects_incomplete_or_malformed_messages(tmp_path,monkeypatch,finish,message):
+    raw=completion('',finish);raw['choices'][0]['message']=message
+    mock_api(monkeypatch,lambda r:httpx.Response(200,json=raw))
+    with pytest.raises(ResponseError):
+        MetaClient(tmp_path).tool_chat([dict(role='user',content='x')],[])

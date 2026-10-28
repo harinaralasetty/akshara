@@ -1,0 +1,455 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="author" content="Hari Naralasetty">
+<title>Akshara · Read with evidence</title>
+<style>
+:root{color-scheme:light;--ink:#172b36;--muted:#586975;--paper:#f4f3ee;--line:#dce1dd;--accent:#a83c22;--focus:#e47229;--green:#24644a;--blue:#2a5a85;--amber:#815c16}
+
+*{box-sizing:border-box}
+body{margin:0;background:var(--paper);color:var(--ink);font:15px/1.55 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+button,input,select{font:inherit}
+button,select{cursor:pointer}
+button{border:1px solid var(--line);background:white;color:var(--ink);padding:.55rem .85rem;border-radius:6px}
+button:hover{border-color:var(--accent)}
+button:disabled{opacity:.55;cursor:wait}
+a{color:var(--accent)}
+:focus-visible{outline:3px solid var(--focus);outline-offset:3px}
+header,main,footer{max-width:1440px;margin:auto;padding:24px 32px}
+header{display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--line);gap:20px}
+.brand{font-size:26px;font-weight:750;letter-spacing:-1px}
+.brand span{color:var(--accent);font-size:22px;margin-right:12px}
+.tagline{margin:0;color:var(--muted);font-size:13px}
+.edition{color:var(--muted);font-size:12px;letter-spacing:.12em;text-transform:uppercase}
+.intro{display:flex;align-items:end;justify-content:space-between;gap:20px;margin-bottom:22px}
+h1{font-size:clamp(25px,3vw,36px);line-height:1.2;letter-spacing:-1px;margin:0 0 8px}
+h2{font-size:17px;margin:0 0 12px}
+p{margin:0 0 12px}
+.intro p{color:var(--muted);max-width:760px}
+.picker{min-width:220px}
+label{display:block;font-size:12px;font-weight:650;color:var(--muted);margin-bottom:5px}
+input,select{width:100%;border:1px solid #cbd3ce;border-radius:6px;background:white;color:var(--ink);padding:.6rem .7rem}
+details{background:#fff;border:1px solid var(--line);border-radius:8px;padding:14px 18px;margin-bottom:20px}
+summary{cursor:pointer;font-weight:600}
+.run-form{display:grid;grid-template-columns:minmax(220px,1fr) 150px 100px auto;gap:12px;align-items:end;margin-top:16px}
+.primary{background:var(--accent);border-color:var(--accent);color:white;white-space:nowrap}
+.hint{font-size:12px;color:var(--muted);margin:10px 0 0}
+.notice{padding:10px 14px;border-left:3px solid var(--amber);background:#fbf0d7;margin-bottom:16px;font-size:13px}
+.status{min-height:24px;color:var(--muted);font-size:13px;margin-bottom:12px}
+.status.error{color:#a32c23}
+.workspace{display:grid;grid-template-columns:220px minmax(0,1.35fr) minmax(260px,.85fr);gap:18px;align-items:start}
+.panel{background:white;border:1px solid var(--line);border-radius:8px;padding:18px;min-width:0}
+.page-list{display:flex;flex-direction:column;gap:8px;max-height:660px;overflow:auto}
+.page-button{text-align:left;display:block;width:100%;padding:10px}
+.page-button.active{border-color:var(--accent);box-shadow:inset 3px 0 var(--accent);background:#fff8f3}
+.page-number{display:block;font-weight:650;margin-bottom:6px}
+.badges{display:flex;gap:5px;flex-wrap:wrap}
+.badge{display:inline-block;font:650 10px/1.6 system-ui,sans-serif;letter-spacing:.03em;border:1px solid var(--line);border-radius:4px;padding:2px 6px;background:#eef1ee;white-space:nowrap}
+.VERIFIED{color:var(--green);background:#e9f3ed;border-color:#bdd5c6}
+.CORRECTED{color:var(--blue);background:#eaf1f8;border-color:#bed1e5}
+.UNCERTAIN{color:var(--amber);background:#fbf1db;border-color:#e8d7ab}
+.route{color:#3c535e;background:#eef2f3}
+.page-heading{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:12px}
+.page-heading h2{margin:0}
+.image-frame{background:#e6e8e3;border:1px solid var(--line);position:relative;min-height:260px;display:flex;justify-content:center;align-items:center}
+.image-stack{position:relative;width:100%;line-height:0}
+.image-stack img{width:100%;height:auto;display:block}
+.image-stack svg{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;overflow:visible}
+.region{fill:#19734e;fill-opacity:.025;stroke:#19734e;stroke-width:1;vector-effect:non-scaling-stroke;pointer-events:all;cursor:pointer}
+.region.uncertain{stroke:#ae7618;fill:#ae7618}
+.region.segmentation{stroke:#496fb7;fill:#496fb7;stroke-dasharray:5 3}
+.region:hover,.region:focus{fill-opacity:.15;stroke-width:2}
+.region.selected,.focus-box{fill:#ed7b25;fill-opacity:.15;stroke:#c34b13;stroke-width:3;vector-effect:non-scaling-stroke}
+.legend{font-size:11px;color:var(--muted);margin-top:10px}
+.empty{color:var(--muted);text-align:center;padding:44px 16px;font-size:14px}
+.evidence{font-size:14px;white-space:pre-wrap;overflow-wrap:anywhere;max-height:250px;overflow:auto;padding:12px;background:#fafaf7;border:1px solid var(--line);margin:12px 0}
+.evidence:empty{display:none}
+.evidence-meta{font-size:12px;color:var(--muted);overflow-wrap:anywhere}
+#ask-form{display:flex;gap:8px}
+#question{min-width:0}
+#ask-form button{flex-shrink:0}
+.answer{white-space:pre-wrap;overflow-wrap:anywhere;margin-top:14px;font-size:14px}
+.citation-list{display:flex;gap:6px;flex-wrap:wrap;margin-top:10px}
+.citation{padding:4px 8px;font-size:12px;color:var(--accent);text-align:left}
+.ask-options{display:flex;align-items:center;gap:10px;margin-bottom:12px}
+.ask-options label{margin:0}
+.ask-options select{width:auto;font-size:12px;padding:4px 8px}
+.records{margin-top:20px}
+.table-scroll{overflow:auto;max-height:440px}
+table{width:100%;border-collapse:collapse;font-size:13px;text-align:left}
+th{font-size:11px;letter-spacing:.05em;text-transform:uppercase;color:var(--muted);background:#fafaf7;position:sticky;top:0}
+th,td{padding:12px;border-bottom:1px solid var(--line);vertical-align:top}
+td.value{min-width:160px;max-width:360px;overflow-wrap:anywhere}
+td.quote{max-width:430px;overflow-wrap:anywhere}
+footer{font-size:12px;color:var(--muted);display:flex;justify-content:space-between;border-top:1px solid var(--line);gap:16px;margin-top:14px}
+footer a{margin-left:12px}
+.visually-hidden{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)}
+[hidden]{display:none!important}
+@media(max-width:1100px){.workspace{grid-template-columns:170px minmax(0,1fr)}
+.inspector{grid-column:1/-1}
+.run-form{grid-template-columns:1fr 140px 80px}
+.run-form button{grid-column:1/-1}
+}
+@media(max-width:650px){header,main,footer{padding:18px 14px}
+.edition{display:none}
+.intro{display:block}
+.picker{margin-top:16px}
+.workspace{grid-template-columns:1fr}
+.page-list{flex-direction:row;max-height:none;overflow-x:auto}
+.page-button{min-width:150px}
+.inspector{grid-column:auto}
+.run-form{grid-template-columns:1fr 90px}
+.run-form .pdf-field{grid-column:1/-1}
+.panel{padding:13px}
+footer{flex-direction:column}
+}
+
+</style>
+</head>
+<body>
+<header><div><div class="brand"><span lang="te">అక్షర</span>Akshara</div><p class="tagline">Read with evidence.</p></div><div class="edition">Telugu document reader · Local demo</div></header>
+<main>
+<div class="intro"><div><h1>The page is the source.</h1><p>Recover Telugu text, inspect the reading, and follow every cited fact back to its exact region.</p></div><div class="picker"><label for="documents">Processed document</label><select id="documents"><option value="">Choose a document</option></select></div></div>
+<details id="run-panel"><summary>Process a demo PDF</summary><form id="run-form" class="run-form"><div class="pdf-field"><label for="pdf-path">PDF path under data/</label><input id="pdf-path" placeholder="demo/ap_2026_I-1.pdf" value="demo/ap_2026_I-1.pdf" required></div><div><label for="run-mode">Model mode</label><select id="run-mode"><option value="fake">Fake · offline</option><option value="replay">Replay · cached</option><option value="live">Live · paid API</option></select></div><div><label for="max-pages">Max pages</label><input id="max-pages" type="number" min="1" value="2" required></div><button id="run-button" class="primary">Process PDF</button></form><p class="hint">Fake mode keeps local recovery and abstains on model reads. Replay needs recorded responses. Live uses MODEL_API_KEY from the server environment and the existing USD 2 request budget.</p></details>
+<div id="status" class="status" role="status" aria-live="polite"></div>
+<div id="notice" class="notice" hidden></div>
+<div class="workspace">
+<aside class="panel"><h2>Pages</h2><div id="pages" class="page-list"><p class="hint">Choose a document or process a demo PDF.</p></div></aside>
+<section class="panel" aria-label="Document page"><div class="page-heading"><h2 id="page-title">Page viewer</h2><div id="page-badges" class="badges"></div></div><div class="image-frame"><div id="image-stack" class="image-stack" hidden><img id="page-image" alt=""><svg id="overlays" xmlns="http://www.w3.org/2000/svg" aria-label="Clickable evidence regions"></svg></div><div id="viewer-empty" class="empty">Select a page to inspect its evidence.</div></div><p class="legend">Solid outlines: recovered spans · Dashed outlines: SAM regions<br>Click an outline or a citation to inspect the source.</p></section>
+<aside class="panel inspector"><h2>Region evidence</h2><p id="evidence-help" class="hint">Click a span, region, or citation to see its text and verification status.</p><div id="evidence-meta" class="evidence-meta"></div><div id="evidence-text" class="evidence" lang="te"></div><hr style="border:0;border-top:1px solid var(--line);margin:20px 0"><h2>Ask this document</h2><p class="hint" style="margin-bottom:12px">Answers quote tool evidence and cite the page. An unsupported answer is withheld.</p><div class="ask-options"><label for="ask-mode">Mode</label><select id="ask-mode"><option value="fake">Fake · offline</option><option value="replay">Replay · cached</option><option value="live">Live · paid API</option></select></div><form id="ask-form"><label class="visually-hidden" for="question">Question about this document</label><input id="question" placeholder="What amount is listed?" maxlength="4000" required><button id="ask-button" class="primary" disabled>Ask</button></form><div id="answer" class="answer" role="status" aria-live="polite"></div><div id="answer-citations" class="citation-list"></div></aside>
+</div>
+<section class="panel records"><h2>Extracted records <span id="record-count" class="badge">0</span></h2><div class="table-scroll"><table><thead><tr><th>Field</th><th>Value</th><th>Quoted evidence</th><th>Verification</th><th>Citation</th></tr></thead><tbody id="records"></tbody></table><div id="records-empty" class="empty">No records yet. Fake mode does not invent records.</div></div></section>
+<p class="hint">VERIFIED means reader agreement, not ground truth. Vision boxes are estimates. UNCERTAIN evidence needs manual review.</p>
+</main>
+<footer><div>By Hari Naralasetty<a href="https://github.com/harinaralasetty" target="_blank" rel="noopener noreferrer">GitHub</a><a href="https://www.linkedin.com/in/harinaralasetty" target="_blank" rel="noopener noreferrer">LinkedIn</a></div><div>Muse Spark · Muse Wonder · SAM 3.1</div></footer>
+<script>
+'use strict';
+const $ = id => document.getElementById(id);
+const NS = 'http://www.w3.org/2000/svg';
+let report = null;
+let documentId = '';
+let currentPage = null;
+let busy = false;
+let loadVersion = 0;
+
+function element(tag, text, className) {
+  const node = document.createElement(tag);
+  if (text !== undefined) node.textContent = text;
+  if (className) node.className = className;
+  return node;
+}
+
+function badge(text, kind = text) {
+  return element('span', text, 'badge ' + kind);
+}
+
+function status(text, error = false) {
+  $('status').textContent = text;
+  $('status').className = 'status' + (error ? ' error' : '');
+}
+
+function setBusy(value) {
+  busy = value;
+  $('run-button').disabled = value;
+  $('ask-button').disabled = value || !report;
+  $('documents').disabled = value;
+}
+
+async function api(path, body) {
+  const options = body ? {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(body)
+  } : {};
+  const response = await fetch(path, options);
+  const result = await response.json();
+  if (!response.ok) {
+    const detail = result.detail;
+    throw new Error(typeof detail === 'string' ? detail : 'Check the request fields.');
+  }
+  return result;
+}
+
+function base() {
+  return '/api/documents/' + encodeURIComponent(documentId);
+}
+
+async function listDocuments(selected = '') {
+  const docs = await api('/api/documents');
+  $('documents').replaceChildren(element('option', 'Choose a document'));
+  $('documents').firstChild.value = '';
+  for (const doc of docs) {
+    const label = doc.document + (doc.simulated ? ' · simulated' : '') +
+      (!doc.complete ? ' · incomplete' : '');
+    const option = element('option', label);
+    option.value = doc.id;
+    $('documents').append(option);
+  }
+  if (selected) $('documents').value = selected;
+  return docs;
+}
+
+function clearEvidence() {
+  $('evidence-meta').replaceChildren();
+  $('evidence-text').textContent = '';
+  $('evidence-help').hidden = false;
+}
+
+function clearAnswer() {
+  $('answer').textContent = '';
+  $('answer-citations').replaceChildren();
+}
+
+function displayedBox(page, box) {
+  const bounds = page.bounds || [0, 0, page.width, page.height];
+  const w = bounds[2] - bounds[0];
+  const h = bounds[3] - bounds[1];
+  const corners = [
+    [box[0] - bounds[0], box[1] - bounds[1]],
+    [box[2] - bounds[0], box[3] - bounds[1]]
+  ];
+  const points = corners.map(([x, y]) => {
+    switch (page.rotation || 0) {
+      case 90: return [h - y, x];
+      case 180: return [w - x, h - y];
+      case 270: return [y, w - x];
+      default: return [x, y];
+    }
+  });
+  const [a, b] = points;
+  return [Math.min(a[0], b[0]), Math.min(a[1], b[1]),
+    Math.abs(b[0] - a[0]), Math.abs(b[1] - a[1])];
+}
+
+function drawRect(item, className) {
+  const rect = document.createElementNS(NS, 'rect');
+  const [x, y, width, height] = displayedBox(currentPage, item.bbox);
+  for (const [key, value] of Object.entries({x, y, width, height})) {
+    rect.setAttribute(key, value);
+  }
+  rect.setAttribute('class', className);
+  return rect;
+}
+
+function inspect(item) {
+  $('evidence-help').hidden = true;
+  const box = item.bbox.map(v => Number(v).toFixed(1)).join(', ');
+  $('evidence-meta').replaceChildren(element('div', 'Page ' + currentPage.page + ' · bbox [' + box + ']'));
+  if (item.verification) $('evidence-meta').append(badge(item.verification));
+  if (item.source || item.concept) {
+    $('evidence-meta').append(element('div', item.source || item.concept));
+  }
+  const fallback = item.concept ? 'SAM region: ' + item.concept +
+    '. Read this region to verify its content.' : 'No text recovered in this region.';
+  $('evidence-text').textContent = item.quote || item.evidence || item.text || fallback;
+  const old = $('overlays').querySelector('.focus-box');
+  if (old) old.remove();
+  $('overlays').append(drawRect(item, 'focus-box'));
+}
+
+function showPage(number, focus = null) {
+  currentPage = report.pages.find(p => p.page === number);
+  if (!currentPage) return;
+  clearEvidence();
+  $('page-title').textContent = 'Page ' + number;
+  $('page-badges').replaceChildren(badge(currentPage.route, 'route'), badge(currentPage.verification.status));
+  for (const button of $('pages').children) {
+    const active = Number(button.dataset.page) === number;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-current', active ? 'page' : 'false');
+  }
+  $('page-image').src = base() + '/pages/' + number + '/image?revision=' + encodeURIComponent(report.revision);
+  $('page-image').alt = 'Rendered page ' + number + ' of ' + report.document;
+  $('viewer-empty').hidden = true;
+  $('image-stack').hidden = false;
+  $('overlays').replaceChildren();
+  $('overlays').setAttribute('viewBox', '0 0 ' + currentPage.width + ' ' + currentPage.height);
+  for (const item of [...currentPage.spans, ...currentPage.regions]) {
+    const isRegion = Boolean(item.concept);
+    const className = 'region' + (isRegion ? ' segmentation' :
+      item.verification === 'UNCERTAIN' ? ' uncertain' : '');
+    const rect = drawRect(item, className);
+    rect.setAttribute('tabindex', '0');
+    rect.setAttribute('role', 'button');
+    rect.setAttribute('aria-label', isRegion ? 'Region: ' + item.concept : 'Span: ' + item.text);
+    const title = document.createElementNS(NS, 'title');
+    title.textContent = item.text || item.concept;
+    rect.append(title);
+    rect.addEventListener('click', () => inspect(item));
+    rect.addEventListener('keydown', event => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        inspect(item);
+      }
+    });
+    $('overlays').append(rect);
+  }
+  if (focus) {
+    inspect(focus);
+    $('page-title').scrollIntoView({behavior: 'smooth', block: 'nearest'});
+  }
+}
+
+function citationButton(item, index) {
+  const prefix = index === undefined ? '' : '[' + (index + 1) + '] ';
+  const button = element('button', prefix + 'Page ' + item.page, 'citation');
+  button.type = 'button';
+  button.title = 'Highlight bbox [' + item.bbox.join(', ') + ']';
+  button.addEventListener('click', () => showPage(item.page, item));
+  return button;
+}
+
+function emptyViewer(message) {
+  $('image-stack').hidden = true;
+  $('viewer-empty').hidden = false;
+  $('viewer-empty').textContent = message;
+  $('page-title').textContent = 'Page viewer';
+  $('page-badges').replaceChildren();
+  clearEvidence();
+}
+
+function renderReport() {
+  const notes = [];
+  if (report.simulated) {
+    notes.push('SIMULATED · Model reads abstain in fake mode. Native and glyph recovery still run; verification remains UNCERTAIN.');
+  }
+  if (!report.complete) {
+    notes.push('INCOMPLETE · Some selected pages did not finish' +
+      (report.error ? ' (' + report.error + ')' : '') + '.');
+  }
+  if (report.truncated) notes.push('Showing ' + report.selected_pages + ' of ' + report.page_count + ' pages.');
+  $('notice').textContent = notes.join(' ');
+  $('notice').hidden = !notes.length;
+  $('pages').replaceChildren();
+  for (const page of report.pages) {
+    const button = element('button', undefined, 'page-button');
+    button.type = 'button';
+    button.dataset.page = page.page;
+    button.append(element('span', 'Page ' + page.page, 'page-number'));
+    const badges = element('div', undefined, 'badges');
+    badges.append(badge(page.route, 'route'), badge(page.verification.status));
+    button.append(badges);
+    button.addEventListener('click', () => showPage(page.page));
+    $('pages').append(button);
+  }
+  $('records').replaceChildren();
+  for (const record of report.records) {
+    const row = element('tr');
+    row.append(element('td', record.kind.replaceAll('_', ' ')),
+      element('td', record.value, 'value'), element('td', record.evidence, 'quote'));
+    const verification = element('td');
+    verification.append(badge(record.verification));
+    const citation = element('td');
+    citation.append(citationButton(record));
+    row.append(verification, citation);
+    $('records').append(row);
+  }
+  $('record-count').textContent = report.records.length;
+  $('records-empty').hidden = report.records.length > 0;
+  if (report.pages.length) showPage(report.pages[0].page);
+  else emptyViewer('This run has no completed pages.');
+  $('ask-mode').value = report.simulated ? 'fake' : 'replay';
+  clearAnswer();
+  $('ask-button').disabled = busy;
+}
+
+async function loadDocument(id) {
+  const version = ++loadVersion;
+  report = null;
+  $('ask-button').disabled = true;
+  clearAnswer();
+  $('pages').replaceChildren();
+  $('records').replaceChildren();
+  $('record-count').textContent = '0';
+  $('records-empty').hidden = false;
+  $('notice').hidden = true;
+  emptyViewer('Loading document…');
+  if (!id) {
+    documentId = '';
+    $('pages').replaceChildren();
+    $('records').replaceChildren();
+    $('record-count').textContent = '0';
+    $('records-empty').hidden = false;
+    $('notice').hidden = true;
+    emptyViewer('Select a page to inspect its evidence.');
+    return;
+  }
+  status('Loading document…');
+  const loaded = await api('/api/documents/' + encodeURIComponent(id) + '/report');
+  if (version !== loadVersion) return;
+  documentId = id;
+  report = loaded;
+  renderReport();
+  status('Ready. Click a citation to inspect its source.');
+}
+
+$('documents').addEventListener('change', () => {
+  loadDocument($('documents').value).catch(error => status(error.message, true));
+});
+
+$('run-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  setBusy(true);
+  status('Processing selected pages…');
+  try {
+    const result = await api('/api/run', {
+      path: $('pdf-path').value.trim(),
+      mode: $('run-mode').value,
+      max_pages: Number($('max-pages').value)
+    });
+    await listDocuments(result.document);
+    await loadDocument(result.document);
+    $('run-panel').open = false;
+  } catch (error) {
+    status(error.message, true);
+    await listDocuments(documentId).catch(() => {});
+  } finally {
+    setBusy(false);
+  }
+});
+
+$('ask-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  if (!report || busy) return;
+  setBusy(true);
+  clearAnswer();
+  status('Looking for evidence…');
+  try {
+    const result = await api('/api/ask', {
+      document: documentId,
+      question: $('question').value.trim(),
+      mode: $('ask-mode').value,
+      max_steps: 6,
+      revision: report.revision
+    });
+    $('answer').textContent = result.answer;
+    for (const [i, citation] of result.citations.entries()) {
+      $('answer-citations').append(citationButton(citation, i));
+    }
+    status((result.simulated ? 'Simulated · ' : '') + (result.abstained ?
+      'Answer withheld: insufficient evidence.' : 'Answer cites returned tool evidence.'));
+  } catch (error) {
+    status(error.message, true);
+  } finally {
+    setBusy(false);
+  }
+});
+
+$('page-image').addEventListener('error', () => {
+  emptyViewer('Page image unavailable. Reload the page to get the current report.');
+  status('The document may have changed. Reload the page before following citations.', true);
+});
+
+listDocuments().then(docs => {
+  if (docs.length) {
+    $('documents').value = docs[0].id;
+    return loadDocument(docs[0].id);
+  }
+  $('run-panel').open = true;
+  status('Process a demo PDF to begin.');
+}).catch(error => status(error.message, true));
+</script>
+</body>
+</html>

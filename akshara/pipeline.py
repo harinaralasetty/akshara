@@ -2,10 +2,11 @@
 
 import json
 from pathlib import Path
+from uuid import uuid4
 
 import pymupdf as fitz
 
-from .evidence import image_box_to_pdf
+from .evidence import image_box_to_pdf, page_bounds
 from .extract import extract_records
 from .recover import glyph_pages, recover_page
 from .triage import triage_document
@@ -49,7 +50,8 @@ def run(pdf, client, *, max_pages=None, output_root="runs"):
     pdf = Path(pdf)
     output = Path(output_root) / pdf.stem
     output.mkdir(parents=True, exist_ok=True)
-    report = dict(document=pdf.name, complete=False, simulated=client.simulated, pages=[], records=[],
+    report = dict(document=pdf.name, generation=uuid4().hex, complete=False,
+                  simulated=client.simulated, pages=[], records=[],
                   coordinates="PDF points, unrotated crop-relative, top-left origin; pages are 1-based",
                   limitations=["Vision boxes are model estimates, not pixel-perfect annotations.",
                                "VERIFIED means conservative reader agreement, not ground truth."])
@@ -77,6 +79,7 @@ def run(pdf, client, *, max_pages=None, output_root="runs"):
                 # IDs in records are local to their page's spans array.
                 report["pages"].append(dict(page=page.number + 1, route=route["label"], image=image_name,
                                             width=page.rect.width, height=page.rect.height,
+                                            bounds=list(page_bounds(page)), rotation=page.rotation,
                                             spans=spans, verification=verification, regions=regions,
                                             records=records, rejected_records=rejected))
                 report["records"].extend(records)
